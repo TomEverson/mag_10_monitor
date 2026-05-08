@@ -34,15 +34,25 @@ Every function must perform these steps in order:
 Pub/Sub guarantees at-least-once delivery. The same message may arrive more
 than once. Functions must not create duplicate rows in BigQuery.
 
-**Deduplication key:** `detected_at + symbol` for signal functions;
-`snapshot_ts` for the sector function.
+**Deduplication key per function:**
+
+| Function    | Key fields |
+|-------------|------------|
+| volume      | `detected_at` + `symbol` |
+| momentum    | `window_end_ts` + `symbol` |
+| volatility  | `detected_at` + `symbol` |
+| sector      | `snapshot_ts` + `symbol` (per row) |
 
 The BigQuery streaming insert buffer provides ~1-minute deduplication via
 `insertId`. The `insertId` passed to `bq_client.py` must be derived
 deterministically from the deduplication key:
 
 ```python
+# volume / volatility
 insert_id = hashlib.md5(f"{detected_at}:{symbol}".encode()).hexdigest()
+
+# momentum
+insert_id = hashlib.md5(f"{window_end_ts}:{symbol}".encode()).hexdigest()
 ```
 
 For the sector snapshot, `insertId` is derived per-symbol row:

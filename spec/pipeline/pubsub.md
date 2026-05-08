@@ -53,26 +53,28 @@ automatically.
   "signal_type": "volume_spike",
   "symbol": "NVDA",
   "price": 875.30,
-  "trade_volume": 12500,
-  "avg_volume": 4200.50,
-  "spike_ratio": 2.98,
-  "window_size": 20,
+  "trade_volume": 48200,
+  "avg_volume": 11800.50,
+  "spike_ratio": 4.08,
+  "window_trade_count": 2341,
+  "window_span_secs": 298.4,
   "trade_ts": 1715172043000,
   "detected_at": "2024-05-08T14:07:23.412Z"
 }
 ```
 
-| Field          | Type    | Required | Description |
-|----------------|---------|----------|-------------|
-| `signal_type`  | string  | Yes      | Always `"volume_spike"` |
-| `symbol`       | string  | Yes      | Equity symbol |
-| `price`        | float   | Yes      | Trade price (USD) |
-| `trade_volume` | float   | Yes      | Volume of triggering trade |
-| `avg_volume`   | float   | Yes      | Rolling average volume (excl. current trade) |
-| `spike_ratio`  | float   | Yes      | `trade_volume / avg_volume` |
-| `window_size`  | integer | Yes      | Trades in the window at signal time |
-| `trade_ts`     | integer | Yes      | Trade timestamp (Unix ms) |
-| `detected_at`  | string  | Yes      | ISO 8601 UTC signal emission time |
+| Field                | Type    | Required | Description |
+|----------------------|---------|----------|-------------|
+| `signal_type`        | string  | Yes      | Always `"volume_spike"` |
+| `symbol`             | string  | Yes      | Equity symbol |
+| `price`              | float   | Yes      | Trade price (USD) |
+| `trade_volume`       | float   | Yes      | Volume of triggering trade |
+| `avg_volume`         | float   | Yes      | Rolling window average volume (excl. current trade) |
+| `spike_ratio`        | float   | Yes      | `trade_volume / avg_volume` |
+| `window_trade_count` | integer | Yes      | Number of trades in the time window at signal time |
+| `window_span_secs`   | float   | Yes      | Actual time span of the window in seconds |
+| `trade_ts`           | integer | Yes      | Trade timestamp (Unix ms) |
+| `detected_at`        | string  | Yes      | ISO 8601 UTC signal emission time |
 
 ---
 
@@ -83,26 +85,30 @@ automatically.
   "signal_type": "momentum_signal",
   "symbol": "TSLA",
   "direction": "DOWN",
-  "current_price": 162.80,
-  "anchor_price": 164.10,
+  "candles_in_direction": 4,
+  "total_candles": 5,
+  "oldest_open": 164.10,
+  "latest_close": 162.80,
   "pct_change": -0.792,
-  "window_size": 15,
-  "trade_ts": 1715172188000,
+  "window_start_ts": 1715171880000,
+  "window_end_ts": 1715172180000,
   "detected_at": "2024-05-08T14:09:48.017Z"
 }
 ```
 
-| Field           | Type    | Required | Description |
-|-----------------|---------|----------|-------------|
-| `signal_type`   | string  | Yes      | Always `"momentum_signal"` |
-| `symbol`        | string  | Yes      | Equity symbol |
-| `direction`     | string  | Yes      | `"UP"` or `"DOWN"` |
-| `current_price` | float   | Yes      | Triggering trade price |
-| `anchor_price`  | float   | Yes      | Oldest price in window |
-| `pct_change`    | float   | Yes      | Percentage change, negative for DOWN |
-| `window_size`   | integer | Yes      | Trades in the window at signal time |
-| `trade_ts`      | integer | Yes      | Trade timestamp (Unix ms) |
-| `detected_at`   | string  | Yes      | ISO 8601 UTC signal emission time |
+| Field                  | Type    | Required | Description |
+|------------------------|---------|----------|-------------|
+| `signal_type`          | string  | Yes      | Always `"momentum_signal"` |
+| `symbol`               | string  | Yes      | Equity symbol |
+| `direction`            | string  | Yes      | `"UP"` or `"DOWN"` |
+| `candles_in_direction` | integer | Yes      | Number of 1-minute candles agreeing on direction |
+| `total_candles`        | integer | Yes      | Total candles evaluated (equals `MOMENTUM_CANDLE_WINDOW`) |
+| `oldest_open`          | float   | Yes      | Open price of the oldest candle in the window |
+| `latest_close`         | float   | Yes      | Close price of the newest candle in the window |
+| `pct_change`           | float   | Yes      | `(latest_close - oldest_open) / oldest_open * 100`, negative for DOWN |
+| `window_start_ts`      | integer | Yes      | Unix ms of the start of the oldest candle's minute |
+| `window_end_ts`        | integer | Yes      | Unix ms of the end of the newest candle's minute |
+| `detected_at`          | string  | Yes      | ISO 8601 UTC signal emission time |
 
 ---
 
@@ -112,27 +118,29 @@ automatically.
 {
   "signal_type": "volatility_spike",
   "symbol": "AMD",
-  "price": 158.72,
-  "mean_price": 155.4180,
-  "std_dev": 1.6240,
-  "z_score": 2.041,
-  "window_size": 20,
+  "price": 163.40,
+  "mean_price": 158.4820,
+  "std_dev": 1.9760,
+  "z_score": 2.503,
+  "window_trade_count": 1872,
+  "window_span_secs": 299.6,
   "trade_ts": 1715172301000,
   "detected_at": "2024-05-08T14:11:41.889Z"
 }
 ```
 
-| Field         | Type    | Required | Description |
-|---------------|---------|----------|-------------|
-| `signal_type` | string  | Yes      | Always `"volatility_spike"` |
-| `symbol`      | string  | Yes      | Equity symbol |
-| `price`       | float   | Yes      | Triggering trade price |
-| `mean_price`  | float   | Yes      | Window mean price |
-| `std_dev`     | float   | Yes      | Population std dev of window prices |
-| `z_score`     | float   | Yes      | `abs(price - mean_price) / std_dev` |
-| `window_size` | integer | Yes      | Trades in the window at signal time |
-| `trade_ts`    | integer | Yes      | Trade timestamp (Unix ms) |
-| `detected_at` | string  | Yes      | ISO 8601 UTC signal emission time |
+| Field                | Type    | Required | Description |
+|----------------------|---------|----------|-------------|
+| `signal_type`        | string  | Yes      | Always `"volatility_spike"` |
+| `symbol`             | string  | Yes      | Equity symbol |
+| `price`              | float   | Yes      | Triggering trade price |
+| `mean_price`         | float   | Yes      | Window mean price |
+| `std_dev`            | float   | Yes      | Population std dev of window prices |
+| `z_score`            | float   | Yes      | `abs(price - mean_price) / std_dev` |
+| `window_trade_count` | integer | Yes      | Number of trades in the time window at signal time |
+| `window_span_secs`   | float   | Yes      | Actual time span of the window in seconds |
+| `trade_ts`           | integer | Yes      | Trade timestamp (Unix ms) |
+| `detected_at`        | string  | Yes      | ISO 8601 UTC signal emission time |
 
 ---
 

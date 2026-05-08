@@ -26,17 +26,18 @@ Clustering is applied where noted to further reduce query costs.
 **Partitioned by:** `timestamp` (DAY)  
 **Clustered by:** `symbol`
 
-| Column         | Type      | Mode     | Description |
-|----------------|-----------|----------|-------------|
-| `timestamp`    | TIMESTAMP | REQUIRED | Trade timestamp converted from `trade_ts` (Unix ms → TIMESTAMP) |
-| `detected_at`  | TIMESTAMP | REQUIRED | When the listener emitted the signal |
-| `processed_at` | TIMESTAMP | REQUIRED | When the Cloud Function processed the message |
-| `symbol`       | STRING    | REQUIRED | Equity symbol (e.g. `"NVDA"`) |
-| `price`        | FLOAT64   | REQUIRED | Trade price at signal time (USD) |
-| `trade_volume` | FLOAT64   | REQUIRED | Volume of the triggering trade |
-| `avg_volume`   | FLOAT64   | REQUIRED | Rolling average volume (excluding current trade) |
-| `spike_ratio`  | FLOAT64   | REQUIRED | `trade_volume / avg_volume` |
-| `window_size`  | INT64     | REQUIRED | Number of trades in the rolling window at signal time |
+| Column               | Type      | Mode     | Description |
+|----------------------|-----------|----------|-------------|
+| `timestamp`          | TIMESTAMP | REQUIRED | Trade timestamp converted from `trade_ts` (Unix ms → TIMESTAMP) |
+| `detected_at`        | TIMESTAMP | REQUIRED | When the listener emitted the signal |
+| `processed_at`       | TIMESTAMP | REQUIRED | When the Cloud Function processed the message |
+| `symbol`             | STRING    | REQUIRED | Equity symbol (e.g. `"NVDA"`) |
+| `price`              | FLOAT64   | REQUIRED | Trade price at signal time (USD) |
+| `trade_volume`       | FLOAT64   | REQUIRED | Volume of the triggering trade |
+| `avg_volume`         | FLOAT64   | REQUIRED | Rolling window average volume (excluding current trade) |
+| `spike_ratio`        | FLOAT64   | REQUIRED | `trade_volume / avg_volume` |
+| `window_trade_count` | INT64     | REQUIRED | Number of trades in the time window at signal time |
+| `window_span_secs`   | FLOAT64   | REQUIRED | Actual time span of the rolling window in seconds |
 
 Notes:
 - `timestamp` is derived by the Cloud Function from `trade_ts` (divide by 1000,
@@ -48,24 +49,28 @@ Notes:
 ## Table: `signals.momentum_signals`
 
 **Populated by:** functions/momentum  
-**Partitioned by:** `timestamp` (DAY)  
+**Partitioned by:** `window_end_ts` (DAY)  
 **Clustered by:** `symbol`, `direction`
 
-| Column          | Type      | Mode     | Description |
-|-----------------|-----------|----------|-------------|
-| `timestamp`     | TIMESTAMP | REQUIRED | Trade timestamp (from `trade_ts`) |
-| `detected_at`   | TIMESTAMP | REQUIRED | When the listener emitted the signal |
-| `processed_at`  | TIMESTAMP | REQUIRED | When the Cloud Function processed the message |
-| `symbol`        | STRING    | REQUIRED | Equity symbol |
-| `direction`     | STRING    | REQUIRED | `"UP"` or `"DOWN"` |
-| `current_price` | FLOAT64   | REQUIRED | Price of the triggering trade |
-| `anchor_price`  | FLOAT64   | REQUIRED | Oldest price in the rolling window |
-| `pct_change`    | FLOAT64   | REQUIRED | Percentage change (negative for DOWN) |
-| `window_size`   | INT64     | REQUIRED | Number of trades in the rolling window at signal time |
+| Column                 | Type      | Mode     | Description |
+|------------------------|-----------|----------|-------------|
+| `window_end_ts`        | TIMESTAMP | REQUIRED | End of the newest candle's minute (partition column); derived from `window_end_ts` in the message |
+| `detected_at`          | TIMESTAMP | REQUIRED | When the listener emitted the signal |
+| `processed_at`         | TIMESTAMP | REQUIRED | When the Cloud Function processed the message |
+| `symbol`               | STRING    | REQUIRED | Equity symbol |
+| `direction`            | STRING    | REQUIRED | `"UP"` or `"DOWN"` |
+| `candles_in_direction` | INT64     | REQUIRED | Number of 1-minute candles agreeing on direction |
+| `total_candles`        | INT64     | REQUIRED | Total candles evaluated |
+| `oldest_open`          | FLOAT64   | REQUIRED | Open price of the oldest candle in the window |
+| `latest_close`         | FLOAT64   | REQUIRED | Close price of the newest candle in the window |
+| `pct_change`           | FLOAT64   | REQUIRED | `(latest_close - oldest_open) / oldest_open * 100`, negative for DOWN |
+| `window_start_ts`      | TIMESTAMP | REQUIRED | Start of the oldest candle's minute; derived from `window_start_ts` in the message |
 
 Notes:
-- `pct_change` is stored with the sign intact (negative = DOWN, positive = UP).
-  Dashboard queries can derive the direction from sign if needed.
+- `window_end_ts` (Unix ms → TIMESTAMP) is the partition column.
+- `pct_change` is stored with sign intact (negative = DOWN, positive = UP).
+- Momentum signals have no per-trade `trade_ts` — the signal fires at candle
+  finalisation, not on a specific trade.
 
 ---
 
@@ -75,17 +80,18 @@ Notes:
 **Partitioned by:** `timestamp` (DAY)  
 **Clustered by:** `symbol`
 
-| Column         | Type      | Mode     | Description |
-|----------------|-----------|----------|-------------|
-| `timestamp`    | TIMESTAMP | REQUIRED | Trade timestamp (from `trade_ts`) |
-| `detected_at`  | TIMESTAMP | REQUIRED | When the listener emitted the signal |
-| `processed_at` | TIMESTAMP | REQUIRED | When the Cloud Function processed the message |
-| `symbol`       | STRING    | REQUIRED | Equity symbol |
-| `price`        | FLOAT64   | REQUIRED | Price of the triggering trade |
-| `mean_price`   | FLOAT64   | REQUIRED | Mean price across the rolling window |
-| `std_dev`      | FLOAT64   | REQUIRED | Population std dev of window prices |
-| `z_score`      | FLOAT64   | REQUIRED | `abs(price - mean_price) / std_dev` |
-| `window_size`  | INT64     | REQUIRED | Number of trades in the rolling window at signal time |
+| Column               | Type      | Mode     | Description |
+|----------------------|-----------|----------|-------------|
+| `timestamp`          | TIMESTAMP | REQUIRED | Trade timestamp (from `trade_ts`) |
+| `detected_at`        | TIMESTAMP | REQUIRED | When the listener emitted the signal |
+| `processed_at`       | TIMESTAMP | REQUIRED | When the Cloud Function processed the message |
+| `symbol`             | STRING    | REQUIRED | Equity symbol |
+| `price`              | FLOAT64   | REQUIRED | Price of the triggering trade |
+| `mean_price`         | FLOAT64   | REQUIRED | Mean price across the rolling window |
+| `std_dev`            | FLOAT64   | REQUIRED | Population std dev of window prices |
+| `z_score`            | FLOAT64   | REQUIRED | `abs(price - mean_price) / std_dev` |
+| `window_trade_count` | INT64     | REQUIRED | Number of trades in the time window at signal time |
+| `window_span_secs`   | FLOAT64   | REQUIRED | Actual time span of the rolling window in seconds |
 
 ---
 

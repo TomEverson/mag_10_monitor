@@ -2,32 +2,61 @@
 
 ## Purpose
 
-Detect when a symbol is exhibiting a sustained directional price move — i.e.
-the price has shifted meaningfully from where it was N trades ago. This catches
-trending moves rather than single-trade noise.
+Detect when a symbol is exhibiting a sustained, consistent directional price
+move across multiple 1-minute candles — distinguishing genuine momentum from
+single-trade noise or transient spikes.
 
 ---
 
 ## Algorithm
 
-Each symbol maintains an independent rolling window of recent trade prices.
+The detector builds 1-minute candles from the raw trade stream and evaluates
+directional consistency across a rolling window of completed candles.
 
-```
-rolling_window[symbol] = deque of last MOMENTUM_WINDOW_SIZE trade prices
-```
+### Candle Construction
+
+Each symbol maintains an **in-progress candle** for the current minute and a
+**deque of completed candles**.
+
+A candle covers exactly one calendar minute (minute boundaries are UTC):
+`[HH:MM:00.000, HH:MM:59.999]`.
 
 On each incoming trade for a symbol:
 
-1. Append `trade.p` to `rolling_window[symbol]`.
-2. If `len(rolling_window[symbol]) < MOMENTUM_MIN_TRADES`, skip signal check.
-3. Let `anchor_price = rolling_window[symbol][0]` — the oldest price in the window.
-4. Let `current_price = trade.p`.
-5. Compute `pct_change = (current_price - anchor_price) / anchor_price * 100`.
-6. If `pct_change >= +MOMENTUM_THRESHOLD_PCT`, emit a signal with `direction = "UP"`.
-7. If `pct_change <= -MOMENTUM_THRESHOLD_PCT`, emit a signal with `direction = "DOWN"`.
+1. Determine the trade's minute bucket: `minute = trade.t // 60_000` (Unix ms
+   floored to the minute).
+2. If `minute == current_candle[symbol].minute`: update the in-progress candle:
+   - `high = max(high, trade.p)`
+   - `low = min(low, trade.p)`
+   - `close = trade.p`
+   - `volume += trade.v`
+3. If `minute > current_candle[symbol].minute`: the previous minute is
+   complete. Finalise it and append to `completed_candles[symbol]`. Start a
+   new in-progress candle with `open = close = trade.p`, `high = trade.p`,
+   `low = trade.p`, `volume = trade.v`, `minute = minute`.
+4. Trim `completed_candles[symbol]` to the last `MOMENTUM_CANDLE_WINDOW`
+   entries.
+5. If `len(completed_candles[symbol]) < MOMENTUM_CANDLE_WINDOW`, skip the
+   signal check — insufficient history.
+6. Evaluate directional consistency across `completed_candles[symbol]`
+   (see below).
 
-The anchor is the oldest retained price, so the threshold measures the full
-move across the window — not tick-to-tick noise.
+### Directional Consistency Check
+
+For each completed candle, determine its direction:
+- `UP` if `candle.close >= candle.open`
+- `DOWN` if `candle.close < candle.open`
+
+Count:
+- `up_count = number of candles where direction == UP`
+- `down_count = number of candles where direction == DOWN`
+
+If `up_count >= MOMENTUM_MIN_AGREE`: emit a signal with `direction = "UP"`.  
+If `down_count >= MOMENTUM_MIN_AGREE`: emit a signal with `direction = "DOWN"`.  
+Otherwise: no signal.
+
+The check runs once per **candle finalisation** (step 3), not on every trade.
+Signals are not evaluated mid-candle.
 
 ---
 
@@ -35,28 +64,32 @@ move across the window — not tick-to-tick noise.
 
 All values live in `listener/config.py`.
 
-| Constant                    | Default | Description |
-|-----------------------------|---------|-------------|
-| `MOMENTUM_WINDOW_SIZE`      | 15      | Max trades retained in the rolling window per symbol |
-| `MOMENTUM_MIN_TRADES`       | 8       | Minimum trades in window before any signal can fire |
-| `MOMENTUM_THRESHOLD_PCT`    | 0.5     | Percentage price change from window anchor required to fire |
-| `MOMENTUM_COOLDOWN_SECS`    | 60      | Seconds before another momentum signal can fire for the same symbol |
+| Constant                   | Default | Description |
+|----------------------------|---------|-------------|
+| `MOMENTUM_CANDLE_WINDOW`   | 5       | Number of completed 1-minute candles to evaluate |
+| `MOMENTUM_MIN_AGREE`       | 3       | Minimum candles pointing the same direction to fire a signal |
+| `MOMENTUM_COOLDOWN_SECS`   | 120     | Seconds before another momentum signal can fire for the same symbol |
+
+With the defaults, a signal fires when 3 or more of the last 5 completed
+1-minute candles agree on direction.
 
 ---
 
 ## Signal Payload
 
-| Field           | Type    | Description |
-|-----------------|---------|-------------|
-| `signal_type`   | string  | Always `"momentum_signal"` |
-| `symbol`        | string  | The equity symbol |
-| `direction`     | string  | `"UP"` or `"DOWN"` |
-| `current_price` | float   | Price of the triggering trade |
-| `anchor_price`  | float   | Oldest price in the rolling window |
-| `pct_change`    | float   | `(current_price - anchor_price) / anchor_price * 100`, rounded to 3 dp |
-| `window_size`   | integer | Number of trades in the window at signal time |
-| `trade_ts`      | integer | Trade timestamp from Finnhub (Unix milliseconds) |
-| `detected_at`   | string  | ISO 8601 UTC timestamp when the signal was emitted |
+| Field               | Type    | Description |
+|---------------------|---------|-------------|
+| `signal_type`       | string  | Always `"momentum_signal"` |
+| `symbol`            | string  | The equity symbol |
+| `direction`         | string  | `"UP"` or `"DOWN"` |
+| `candles_in_direction` | integer | Number of candles agreeing on direction (e.g. `4`) |
+| `total_candles`     | integer | Total candles evaluated (always equals `MOMENTUM_CANDLE_WINDOW` when a signal fires) |
+| `oldest_open`       | float   | Open price of the oldest candle in the window |
+| `latest_close`      | float   | Close price of the newest candle in the window |
+| `pct_change`        | float   | `(latest_close - oldest_open) / oldest_open * 100`, rounded to 3 dp |
+| `window_start_ts`   | integer | Unix ms of the start of the oldest candle's minute |
+| `window_end_ts`     | integer | Unix ms of the end of the newest candle's minute |
+| `detected_at`       | string  | ISO 8601 UTC timestamp when the signal was emitted |
 
 ### Example
 
@@ -65,11 +98,13 @@ All values live in `listener/config.py`.
   "signal_type": "momentum_signal",
   "symbol": "TSLA",
   "direction": "DOWN",
-  "current_price": 162.80,
-  "anchor_price": 164.10,
+  "candles_in_direction": 4,
+  "total_candles": 5,
+  "oldest_open": 164.10,
+  "latest_close": 162.80,
   "pct_change": -0.792,
-  "window_size": 15,
-  "trade_ts": 1715172188000,
+  "window_start_ts": 1715171880000,
+  "window_end_ts": 1715172180000,
   "detected_at": "2024-05-08T14:09:48.017Z"
 }
 ```
@@ -79,18 +114,23 @@ All values live in `listener/config.py`.
 ## Cooldown
 
 After a signal fires for a symbol, no further momentum signal fires for that
-symbol for `MOMENTUM_COOLDOWN_SECS` seconds. The rolling window continues
-accumulating trades during the cooldown.
-
-The cooldown does **not** reset direction independently — if an UP signal fires
-and the price then reverses, a DOWN signal can still fire once the cooldown
-expires.
+symbol for `MOMENTUM_COOLDOWN_SECS` seconds (wall-clock, `time.monotonic()`).
+Candle construction and evaluation continue during the cooldown; the result
+is simply suppressed.
 
 ---
 
 ## Edge Cases
 
-- If the anchor price is 0, skip the signal check.
-- A signal fires on the first trade that crosses the threshold; subsequent
-  trades in the same direction during the cooldown window do not re-fire.
-- The rolling window is reset to empty on WebSocket reconnect.
+- Candle evaluation only happens at minute boundaries (when a candle is
+  finalised). If no new trade arrives to cross a minute boundary, no
+  evaluation occurs — the candle remains in-progress indefinitely until the
+  next trade.
+- If a trade arrives with a timestamp earlier than the current minute (late
+  trade — should be caught by data quality filtering in the listener), it is
+  ignored for candle purposes; do not close the current candle early.
+- On WebSocket reconnect, all candle state (in-progress and completed) is
+  reset to empty. The cooldown timer is also reset.
+- If both `up_count` and `down_count` meet the threshold simultaneously
+  (only possible if `MOMENTUM_MIN_AGREE` is set ≤ `MOMENTUM_CANDLE_WINDOW / 2`,
+  which the defaults prevent), the `UP` signal takes precedence.
