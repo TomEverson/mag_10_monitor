@@ -1,0 +1,10 @@
+[project]
+name = "mag10-sector-function"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "functions-framework>=3.5",
+    "google-cloud-bigquery>=3.0",
+    "google-cloud-storage>=2.0",
+    "pydantic>=2.0",
+]

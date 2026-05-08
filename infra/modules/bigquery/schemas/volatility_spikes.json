@@ -1,0 +1,12 @@
+[
+  {"name": "timestamp",          "type": "TIMESTAMP", "mode": "REQUIRED", "description": "Trade timestamp (from trade_ts)"},
+  {"name": "detected_at",        "type": "TIMESTAMP", "mode": "REQUIRED", "description": "When the listener emitted the signal"},
+  {"name": "processed_at",       "type": "TIMESTAMP", "mode": "REQUIRED", "description": "When the Cloud Function processed the message"},
+  {"name": "symbol",             "type": "STRING",    "mode": "REQUIRED", "description": "Equity symbol"},
+  {"name": "price",              "type": "FLOAT64",   "mode": "REQUIRED", "description": "Price of the triggering trade"},
+  {"name": "mean_price",         "type": "FLOAT64",   "mode": "REQUIRED", "description": "Mean price across the rolling window"},
+  {"name": "std_dev",            "type": "FLOAT64",   "mode": "REQUIRED", "description": "Population standard deviation of window prices"},
+  {"name": "z_score",            "type": "FLOAT64",   "mode": "REQUIRED", "description": "abs(price - mean_price) / std_dev"},
+  {"name": "window_trade_count", "type": "INT64",     "mode": "REQUIRED", "description": "Number of trades in the time window at signal time"},
+  {"name": "window_span_secs",   "type": "FLOAT64",   "mode": "REQUIRED", "description": "Actual time span of the rolling window in seconds"}
+]

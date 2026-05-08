@@ -1,0 +1,13 @@
+[
+  {"name": "window_end_ts",        "type": "TIMESTAMP", "mode": "REQUIRED", "description": "End of the newest candle's minute (partition column)"},
+  {"name": "detected_at",          "type": "TIMESTAMP", "mode": "REQUIRED", "description": "When the listener emitted the signal"},
+  {"name": "processed_at",         "type": "TIMESTAMP", "mode": "REQUIRED", "description": "When the Cloud Function processed the message"},
+  {"name": "symbol",               "type": "STRING",    "mode": "REQUIRED", "description": "Equity symbol"},
+  {"name": "direction",            "type": "STRING",    "mode": "REQUIRED", "description": "UP or DOWN"},
+  {"name": "candles_in_direction", "type": "INT64",     "mode": "REQUIRED", "description": "Number of 1-minute candles agreeing on direction"},
+  {"name": "total_candles",        "type": "INT64",     "mode": "REQUIRED", "description": "Total candles evaluated"},
+  {"name": "oldest_open",          "type": "FLOAT64",   "mode": "REQUIRED", "description": "Open price of the oldest candle in the window"},
+  {"name": "latest_close",         "type": "FLOAT64",   "mode": "REQUIRED", "description": "Close price of the newest candle in the window"},
+  {"name": "pct_change",           "type": "FLOAT64",   "mode": "REQUIRED", "description": "Percentage change, negative for DOWN"},
+  {"name": "window_start_ts",      "type": "TIMESTAMP", "mode": "REQUIRED", "description": "Start of the oldest candle's minute"}
+]

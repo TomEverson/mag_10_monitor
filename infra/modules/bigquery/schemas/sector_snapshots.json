@@ -1,0 +1,12 @@
+[
+  {"name": "snapshot_ts",   "type": "TIMESTAMP", "mode": "REQUIRED", "description": "When the snapshot was taken (partition column)"},
+  {"name": "processed_at",  "type": "TIMESTAMP", "mode": "REQUIRED", "description": "When the Cloud Function processed the message"},
+  {"name": "symbol",        "type": "STRING",    "mode": "REQUIRED", "description": "Equity symbol"},
+  {"name": "last_price",    "type": "FLOAT64",   "mode": "NULLABLE", "description": "Most recent trade price; NULL if no trades received"},
+  {"name": "open_price",    "type": "FLOAT64",   "mode": "NULLABLE", "description": "First trade price of the session; NULL if no trades received"},
+  {"name": "pct_change",    "type": "FLOAT64",   "mode": "NULLABLE", "description": "Session price change percent; NULL if price unavailable"},
+  {"name": "trade_count",   "type": "INT64",     "mode": "REQUIRED", "description": "Trades received this session for this symbol"},
+  {"name": "total_volume",  "type": "FLOAT64",   "mode": "REQUIRED", "description": "Cumulative session volume for this symbol"},
+  {"name": "last_trade_ts", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "Timestamp of last trade; NULL if no trades received"},
+  {"name": "is_stale",      "type": "BOOL",      "mode": "REQUIRED", "description": "True if no trade received in last SECTOR_STALE_SECS seconds"}
+]
