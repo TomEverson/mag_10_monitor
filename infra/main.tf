@@ -76,6 +76,12 @@ resource "google_project_iam_member" "listener_log_writer" {
   member  = "serviceAccount:${google_service_account.listener.email}"
 }
 
+resource "google_project_iam_member" "listener_ar_reader" {
+  project = var.gcp_project_id
+  role    = "roles/artifactregistry.reader"
+  member  = "serviceAccount:${google_service_account.listener.email}"
+}
+
 # ── IAM — functions SA ───────────────────────────────────────────────────────
 
 resource "google_project_iam_member" "functions_bq_editor" {
@@ -94,6 +100,20 @@ resource "google_project_iam_member" "functions_log_writer" {
   project = var.gcp_project_id
   role    = "roles/logging.logWriter"
   member  = "serviceAccount:${google_service_account.functions.email}"
+}
+
+# Allows Pub/Sub push subscriptions to invoke Cloud Run-backed functions via OIDC
+resource "google_project_iam_member" "functions_run_invoker" {
+  project = var.gcp_project_id
+  role    = "roles/run.invoker"
+  member  = "serviceAccount:${google_service_account.functions.email}"
+}
+
+# Allows the Pub/Sub service agent to generate OIDC tokens for mag10-functions-sa
+resource "google_service_account_iam_member" "pubsub_token_creator" {
+  service_account_id = google_service_account.functions.name
+  role               = "roles/iam.serviceAccountTokenCreator"
+  member             = "serviceAccount:service-214081441484@gcp-sa-pubsub.iam.gserviceaccount.com"
 }
 
 # ── Secret Manager ────────────────────────────────────────────────────────────
@@ -145,6 +165,7 @@ module "gcs" {
   source = "./modules/gcs"
 
   project_id = var.gcp_project_id
+  region     = var.region
 
   depends_on = [google_project_service.apis]
 }
@@ -153,6 +174,7 @@ module "vm" {
   source = "./modules/vm"
 
   project_id            = var.gcp_project_id
+  region                = var.region
   zone                  = var.zone
   env                   = var.env
   listener_image        = var.listener_image

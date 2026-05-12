@@ -3,6 +3,11 @@ variable "project_id" {
   type        = string
 }
 
+variable "region" {
+  description = "GCP region (used to configure Artifact Registry Docker auth)"
+  type        = string
+}
+
 variable "zone" {
   description = "Compute zone for the listener VM"
   type        = string

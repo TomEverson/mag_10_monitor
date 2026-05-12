@@ -3,13 +3,23 @@ locals {
     #!/bin/bash
     set -e
 
-    # Fetch Finnhub API key from Secret Manager at boot time
-    FINNHUB_API_KEY=$(gcloud secrets versions access latest \
-      --secret=${var.finnhub_secret_name} \
-      --project=${var.project_id})
+    # COS does not have gcloud — use the metadata server for auth instead.
 
-    # Authenticate Docker to Artifact Registry
-    gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+    # Fetch an access token from the instance metadata server
+    TOKEN=$(curl -sf "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+      -H "Metadata-Flavor: Google" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+    # Fetch Finnhub API key from Secret Manager REST API
+    FINNHUB_API_KEY=$(curl -sf \
+      "https://secretmanager.googleapis.com/v1/projects/${var.project_id}/secrets/${var.finnhub_secret_name}/versions/latest:access" \
+      -H "Authorization: Bearer $TOKEN" | \
+      python3 -c "import sys,json,base64; print(base64.b64decode(json.load(sys.stdin)['payload']['data']).decode())")
+
+    # Authenticate Docker to Artifact Registry using the access token
+    # /root is read-only on COS — use /tmp for Docker config
+    export DOCKER_CONFIG=/tmp/docker-config
+    mkdir -p $DOCKER_CONFIG
+    echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin ${var.region}-docker.pkg.dev
 
     # Pull the latest listener image
     docker pull ${var.listener_image}

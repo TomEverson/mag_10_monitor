@@ -16,7 +16,7 @@ set -euo pipefail
 : "${GCP_PROJECT_ID:?GCP_PROJECT_ID must be set}"
 REGION="${REGION:-us-central1}"
 BQ_DATASET="${BQ_DATASET:-signals}"
-GCS_BUCKET_RAW="mag10-raw-${GCP_PROJECT_ID}"
+GCS_BUCKET_RAW="mag-10-raw"
 SA_EMAIL="mag10-functions-sa@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -40,15 +40,17 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # Deploy each function
 # ---------------------------------------------------------------------------
-declare -A FUNCTION_NAMES=(
-  [volume]="mag10-volume-handler"
-  [momentum]="mag10-momentum-handler"
-  [volatility]="mag10-volatility-handler"
-  [sector]="mag10-sector-handler"
-)
+fn_name() {
+  case "$1" in
+    volume)     echo "mag10-volume-handler" ;;
+    momentum)   echo "mag10-momentum-handler" ;;
+    volatility) echo "mag10-volatility-handler" ;;
+    sector)     echo "mag10-sector-handler" ;;
+  esac
+}
 
 for fn in volume momentum volatility sector; do
-  name="${FUNCTION_NAMES[$fn]}"
+  name="$(fn_name "${fn}")"
   echo "Deploying ${name} ..."
   gcloud functions deploy "${name}" \
     --gen2 \
@@ -73,7 +75,7 @@ echo ""
 echo "Function URLs — add these to infra/terraform.tfvars, then run terraform apply:"
 echo ""
 for fn in volume momentum volatility sector; do
-  name="${FUNCTION_NAMES[$fn]}"
+  name="$(fn_name "${fn}")"
   url=$(gcloud functions describe "${name}" \
     --gen2 \
     --project="${GCP_PROJECT_ID}" \

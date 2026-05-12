@@ -1,6 +1,6 @@
 resource "google_storage_bucket" "raw" {
   # Bucket names must be globally unique; project ID suffix ensures this
-  name          = "mag10-raw-${var.project_id}"
+  name          = "mag-10-raw"
   location      = var.region
   storage_class = "STANDARD"
 

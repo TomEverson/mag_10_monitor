@@ -1,3 +1,26 @@
+# Python
 .venv
 __pycache__
+*.pyc
+*.pyo
+.pytest_cache
+
+# Environment
 .env
+.env.*
+!.env.example
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfstate.lock.info
+*.tfvars
+!*.tfvars.example
+.terraform.lock.hcl
+
+# Docker
+listener/.dockerignore
+
+# macOS
+.DS_Store
