@@ -293,6 +293,7 @@ dependencies = [
     { name = "pandas" },
     { name = "plotly" },
     { name = "python-dotenv" },
+    { name = "requests" },
     { name = "streamlit" },
 ]
 
@@ -304,6 +305,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.1.4" },
     { name = "plotly", specifier = ">=5.18.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "requests", specifier = ">=2.31.0" },
     { name = "streamlit", specifier = ">=1.32.0" },
 ]
 

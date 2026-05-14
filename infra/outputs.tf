@@ -42,3 +42,8 @@ output "finnhub_secret_name" {
   description = "Secret Manager secret name for the Finnhub API key"
   value       = google_secret_manager_secret.finnhub_key.secret_id
 }
+
+output "dashboard_url" {
+  description = "Cloud Run dashboard URL"
+  value       = google_cloud_run_v2_service.dashboard.uri
+}

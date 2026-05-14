@@ -32,6 +32,11 @@ variable "listener_image" {
   type        = string
 }
 
+variable "dashboard_image" {
+  description = "Full Artifact Registry Docker image URI for the dashboard (e.g. asia-southeast1-docker.pkg.dev/project/mag10-images/dashboard:latest)"
+  type        = string
+}
+
 # Cloud Function URLs — leave empty on first apply (subscriptions use pull).
 # Set after functions are deployed and run terraform apply again to switch to push.
 variable "volume_function_url" {

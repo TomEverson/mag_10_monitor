@@ -12,4 +12,5 @@ dependencies = [
     "google-cloud-bigquery-storage>=2.24.0",
     "db-dtypes>=1.2.0",
     "python-dotenv>=1.0.0",
+    "requests>=2.31.0",
 ]

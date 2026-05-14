@@ -140,6 +140,130 @@ resource "google_artifact_registry_repository" "images" {
 
 # ── Modules ───────────────────────────────────────────────────────────────────
 
+# ── Dashboard service account ─────────────────────────────────────────────────
+
+resource "google_service_account" "dashboard" {
+  account_id   = "mag10-dashboard-sa"
+  display_name = "MAG10 Dashboard"
+  description  = "Used by the Cloud Run dashboard service"
+}
+
+resource "google_project_iam_member" "dashboard_bq_viewer" {
+  project = var.gcp_project_id
+  role    = "roles/bigquery.dataViewer"
+  member  = "serviceAccount:${google_service_account.dashboard.email}"
+}
+
+resource "google_project_iam_member" "dashboard_bq_job_user" {
+  project = var.gcp_project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.dashboard.email}"
+}
+
+resource "google_project_iam_member" "dashboard_bq_read_session" {
+  project = var.gcp_project_id
+  role    = "roles/bigquery.readSessionUser"
+  member  = "serviceAccount:${google_service_account.dashboard.email}"
+}
+
+resource "google_project_iam_member" "dashboard_secret_accessor" {
+  project = var.gcp_project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = "serviceAccount:${google_service_account.dashboard.email}"
+}
+
+# ── Dashboard password secret ─────────────────────────────────────────────────
+# After apply, set the value with:
+#   echo -n "yourpassword" | gcloud secrets versions add mag10-dashboard-password --data-file=-
+
+resource "google_secret_manager_secret" "dashboard_password" {
+  secret_id = "mag10-dashboard-password"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.apis]
+}
+
+# ── Cloud Run — dashboard ─────────────────────────────────────────────────────
+
+resource "google_cloud_run_v2_service" "dashboard" {
+  name     = "mag10-dashboard"
+  location = var.region
+
+  template {
+    service_account = google_service_account.dashboard.email
+
+    scaling {
+      min_instance_count = 0
+      max_instance_count = 1
+    }
+
+    containers {
+      image = var.dashboard_image
+
+      ports {
+        container_port = 8080
+      }
+
+      resources {
+        limits = {
+          memory = "512Mi"
+          cpu    = "1"
+        }
+      }
+
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.gcp_project_id
+      }
+
+      env {
+        name  = "BQ_DATASET"
+        value = var.bq_dataset
+      }
+
+      env {
+        name = "DASHBOARD_PASSWORD"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.dashboard_password.secret_id
+            version = "latest"
+          }
+        }
+      }
+
+      env {
+        name = "FINNHUB_API_KEY"
+        value_source {
+          secret_key_ref {
+            secret  = google_secret_manager_secret.finnhub_key.secret_id
+            version = "latest"
+          }
+        }
+      }
+    }
+  }
+
+  depends_on = [
+    google_project_service.apis,
+    google_project_iam_member.dashboard_bq_viewer,
+    google_project_iam_member.dashboard_bq_job_user,
+    google_project_iam_member.dashboard_bq_read_session,
+    google_project_iam_member.dashboard_secret_accessor,
+  ]
+}
+
+# Public access — password auth is handled inside the app
+resource "google_cloud_run_v2_service_iam_member" "dashboard_public" {
+  project  = google_cloud_run_v2_service.dashboard.project
+  location = google_cloud_run_v2_service.dashboard.location
+  name     = google_cloud_run_v2_service.dashboard.name
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+# ── Modules ───────────────────────────────────────────────────────────────────
+
 module "pubsub" {
   source = "./modules/pubsub"
 
