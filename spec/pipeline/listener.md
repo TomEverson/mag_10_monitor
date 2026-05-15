@@ -1,45 +1,47 @@
-# Spec: Listener
+# Spec: Listener Services
 
 ## Overview
 
-The listener is a Python process that runs continuously on an e2-micro GCP VM.
-It owns the Finnhub WebSocket connection, dispatches incoming trades to all
-four detectors, and publishes signals to Pub/Sub. It has no HTTP interface and
-no external dependencies beyond Finnhub and Pub/Sub.
+The listener role is split across **two separate VMs**:
+
+| VM | Name | Responsibility |
+|---|---|---|
+| WebSocket VM | `mag10-websocket-vm-prod` | Ingest raw trades from Finnhub, publish to Pub/Sub |
+| Detection VM | `mag10-detection-vm-prod` | Consume raw trades, run detectors, publish signals |
+
+Both run on e2-micro instances. Neither writes to BigQuery or GCS directly.
 
 ---
 
-## Entry Point
+## WebSocket VM
 
-`listener/main.py` is the entry point. It must:
+### Overview
 
-1. Load configuration from environment variables (via `config.py`).
+The WebSocket VM is the only service with a Finnhub connection. Its sole
+responsibility is to receive raw trades and publish them to the
+`mag10-raw-trades` Pub/Sub topic. It performs no detection logic.
+
+### Entry Point
+
+`listener/main.py`
+
+1. Load configuration from environment variables via `config.py`.
 2. Initialise the Pub/Sub publisher (`publisher.py`).
-3. Initialise all four detector instances.
-4. Start the sector snapshot timer (async task or thread).
-5. Open the WebSocket connection and enter the receive loop.
-6. Handle SIGTERM and SIGINT gracefully (drain in-flight publishes, close
-   the WebSocket cleanly before exiting).
+3. Open the WebSocket connection and enter the receive loop.
+4. Handle SIGTERM and SIGINT gracefully — drain in-flight publishes, close
+   WebSocket cleanly before exiting.
 
----
+### Concurrency Model
 
-## Concurrency Model
+asyncio throughout. All I/O (WebSocket receive, Pub/Sub publish) is async.
 
-The listener uses **asyncio** throughout. All I/O (WebSocket, Pub/Sub publish)
-is async. Detector logic is synchronous CPU work executed directly in the event
-loop — it must remain fast (sub-millisecond per trade) to avoid blocking the
-loop.
+| Component | Async? | Notes |
+|---|---|---|
+| WebSocket receive loop | Yes | `async for message in ws` |
+| Trade validation | No | Synchronous, sub-millisecond |
+| Pub/Sub publish | Yes | Fire-and-forget with error callback |
 
-| Component              | Async? | Notes |
-|------------------------|--------|-------|
-| WebSocket receive loop | Yes    | `async for message in ws` |
-| Detector `.process(trade)` calls | No | Called synchronously inside receive loop |
-| Pub/Sub publish        | Yes    | Non-blocking; fire-and-forget with error logging |
-| Sector snapshot timer  | Yes    | `asyncio.create_task` with `asyncio.sleep` loop |
-
----
-
-## WebSocket Lifecycle
+### WebSocket Lifecycle
 
 ```
 start
@@ -51,7 +53,7 @@ connect_with_backoff()
   ▼
 receive_loop()
   │  for each frame:
-  │    if type == "trade": dispatch to detectors
+  │    if type == "trade": validate + publish each trade to mag10-raw-trades
   │    if type == "ping":  send pong
   │    else: log DEBUG, discard
   ▼
@@ -61,137 +63,171 @@ on_disconnect()
   └► connect_with_backoff()  (retry loop)
 ```
 
-The listener never exits the reconnect loop on its own — it retries
+The WebSocket VM never exits the reconnect loop on its own — it retries
 indefinitely until SIGTERM is received.
 
-### Backoff schedule
+### Backoff Schedule
 
 | Attempt | Delay |
-|---------|-------|
-| 1       | 5s    |
-| 2       | 10s   |
-| 3       | 20s   |
-| 4       | 40s   |
-| 5       | 80s   |
-| 6+      | 120s  |
+|---|---|
+| 1 | 5s |
+| 2 | 10s |
+| 3 | 20s |
+| 4 | 40s |
+| 5 | 80s |
+| 6+ | 120s |
 
-Delay resets to 5s after a connection that remains open for at least 60 seconds
-(considered a successful recovery).
+Delay resets to 5s after a connection open for at least 60 seconds.
+
+### Trade Validation
+
+Before publishing, each trade must pass validation:
+
+1. `s` (symbol) must be in `SYMBOLS`.
+2. `p` (price) must be present and > 0.
+3. `v` (volume) must be present and ≥ 0.
+4. `t` (timestamp ms) must be present.
+5. Trade must not be stale: `now_ms - t <= 60_000` (60-second staleness cutoff).
+
+Invalid trades are discarded silently (DEBUG log only).
+
+### Publisher
+
+`listener/publisher.py` wraps `PublisherClient`. It must:
+
+- Serialise the raw trade dict to JSON (UTF-8 bytes).
+- Call `client.publish(topic_path, data)`.
+- Catch and log all exceptions at ERROR level — never raise to the caller.
+
+Topic path: `projects/{GCP_PROJECT_ID}/topics/mag10-raw-trades`
+
+### Configuration (`config.py`)
+
+| Variable | Source | Description |
+|---|---|---|
+| `FINNHUB_API_KEY` | Secret Manager | Finnhub WebSocket auth |
+| `GCP_PROJECT_ID` | Env | GCP project |
+| `PUBSUB_TOPIC_RAW_TRADES` | Env | Raw trades topic name |
+| `SYMBOLS` | `config.py` | Hardcoded set of 10 symbols |
+
+### Logging
+
+| Level | When |
+|---|---|
+| INFO | Startup, connected, reconnecting |
+| WARNING | Disconnect, stale trade discarded |
+| DEBUG | Every trade received, pings, discarded frames |
+| ERROR | Publish failures, unhandled exceptions |
 
 ---
 
-## Trade Dispatch
+## Detection VM
 
-For each trade in a received frame:
+### Overview
 
-1. Validate the trade (see `spec/data-sources.md` — Data Quality).
-2. For each detector: call `detector.process(trade)`.
-3. If `detector.process(trade)` returns a signal dict, call
-   `publisher.publish(topic, signal)`.
-4. Continue to the next trade.
+The Detection VM subscribes to `mag10-raw-trades` (pull subscription),
+runs all four stateful detectors against each trade, and publishes signals
+to `mag10-processed-signals`. It has no Finnhub connection.
 
-Detectors are called in this fixed order: volume → momentum → volatility →
-sector. All four are called for every valid trade regardless of whether earlier
-detectors fired.
+### Entry Point
 
----
+`detection/main.py`
 
-## Detector Interface
+1. Load configuration from environment variables.
+2. Run warm-start procedure (see `spec/pipeline/bronze.md`).
+3. Initialise the Pub/Sub subscriber (pull) and publisher.
+4. Enter the message receive loop.
+5. Handle SIGTERM and SIGINT gracefully.
 
-Each detector in `listener/detectors/` must implement the `BaseDetector`
-abstract class defined in `listener/detectors/base.py`:
+### Concurrency Model
+
+asyncio throughout.
+
+| Component | Async? | Notes |
+|---|---|---|
+| Pub/Sub pull loop | Yes | Streaming pull via `SubscriberClient` |
+| Detector `.process(trade)` calls | No | Synchronous CPU work in event loop |
+| Pub/Sub publish | Yes | Fire-and-forget with error callback |
+| Sector snapshot timer | Yes | `asyncio.create_task` with `asyncio.sleep` loop |
+
+### Message Processing
+
+For each raw trade message received from `mag10-raw-trades`:
+
+1. Parse the JSON payload — fields `s`, `p`, `v`, `t`.
+2. Call `detector.process(trade)` for each detector in order:
+   volume → momentum → volatility → sector.
+3. For each non-None result, publish to `mag10-processed-signals` with
+   a Pub/Sub message attribute `signal_type` set to the signal's
+   `signal_type` field value.
+4. Ack the message after all detectors have processed it.
+
+### Pub/Sub Message Attributes
+
+The Detection VM sets the `signal_type` attribute on each published message
+to enable Pub/Sub filtering on the `mag10-processed-signals` topic:
+
+```python
+publisher.publish(
+    topic_path,
+    data=json.dumps(signal).encode(),
+    signal_type=signal["signal_type"]   # Pub/Sub message attribute
+)
+```
+
+### Detector Interface
+
+Each detector in `detection/detectors/` implements `BaseDetector`:
 
 ```python
 class BaseDetector(ABC):
     @abstractmethod
     def process(self, trade: dict) -> dict | None:
-        """
-        Receive one validated trade. Return a signal dict if a signal fired,
-        or None otherwise.
-        """
+        """Return a signal dict if fired, None otherwise."""
 
     @abstractmethod
     def reset(self) -> None:
-        """Reset all rolling windows and internal state (called on reconnect)."""
+        """Reset all rolling windows (called on reconnect)."""
 ```
 
-The sector detector's `process` method always returns `None` — it publishes
-signals via a separate timer path, not via the return value.
+The sector detector's `process()` always returns `None` — it publishes
+via a separate timer loop.
 
----
-
-## Sector Snapshot Timer
-
-A separate asyncio task runs a loop:
+### Sector Snapshot Timer
 
 ```python
 async def sector_snapshot_loop(sector_detector, publisher):
     while True:
         await asyncio.sleep(SECTOR_SNAPSHOT_INTERVAL_SECS)
         payload = sector_detector.get_snapshot()
-        await publisher.publish(PUBSUB_TOPIC_SECTOR, payload)
+        publisher.publish(topic_path, payload, signal_type="sector_snapshot")
 ```
 
-`sector_detector.get_snapshot()` is synchronous and returns the signal dict
-defined in `spec/detectors/sector.md`. The task is cancelled on SIGTERM.
+### Configuration
 
----
+| Variable | Source | Description |
+|---|---|---|
+| `GCP_PROJECT_ID` | Env | GCP project |
+| `PUBSUB_SUBSCRIPTION_RAW` | Env | Raw trades pull subscription name |
+| `PUBSUB_TOPIC_PROCESSED` | Env | Processed signals topic name |
+| `GCS_BUCKET_RAW` | Env | Bronze/Silver GCS bucket |
+| Detector constants | `config.py` | All thresholds and window sizes |
+| `SYMBOLS` | `config.py` | Hardcoded set of 10 symbols |
 
-## Publisher
+### Logging
 
-`listener/publisher.py` wraps the Google Cloud Pub/Sub `PublisherClient`. It
-must:
+| Level | When |
+|---|---|
+| INFO | Startup, warm-start complete, signal detected |
+| WARNING | Message parse error, publish failure |
+| DEBUG | Every trade processed |
+| ERROR | Unhandled exception, repeated failures |
 
-- Serialise the signal dict to JSON (UTF-8 bytes).
-- Call `client.publish(topic_path, data)` — this is asynchronous in the GCP
-  client library; the returned future must be awaited or scheduled, and any
-  exception must be caught and logged at ERROR level.
-- Not raise exceptions to the caller — publish failures are logged but do not
-  crash the receive loop.
+### Resource Constraints
 
-Topic paths are fully qualified:
-`projects/{GCP_PROJECT_ID}/topics/{PUBSUB_TOPIC_*}`
+Both VMs run on e2-micro (1 vCPU, 1 GB RAM):
 
----
-
-## Configuration (`config.py`)
-
-`listener/config.py` reads all configuration from environment variables and
-defines detector constants. It must not contain any default credentials.
-
-| Variable                    | Source           | Description |
-|-----------------------------|------------------|-------------|
-| `FINNHUB_API_KEY`           | Env / Secret Mgr | Finnhub WebSocket auth |
-| `GCP_PROJECT_ID`            | Env              | GCP project |
-| `PUBSUB_TOPIC_VOLUME`       | Env              | Topic name (not full path) |
-| `PUBSUB_TOPIC_MOMENTUM`     | Env              | Topic name |
-| `PUBSUB_TOPIC_VOLATILITY`   | Env              | Topic name |
-| `PUBSUB_TOPIC_SECTOR`       | Env              | Topic name |
-| Detector constants          | `config.py`      | All thresholds and window sizes |
-| `SYMBOLS`                   | `config.py`      | Hardcoded list of 10 symbols |
-
----
-
-## Logging
-
-| Level   | When |
-|---------|------|
-| INFO    | Startup, successful connection, reconnect, signal detected |
-| WARNING | Disconnect, stale trade discarded, publish failure |
-| DEBUG   | Every trade received, pings, discarded frames |
-| ERROR   | Unhandled exception in receive loop, repeated publish failures |
-
-Logs are written to stdout in plain text. GCP Cloud Logging ingests stdout
-from the VM automatically.
-
----
-
-## Resource Constraints
-
-Running on e2-micro (1 vCPU, 1 GB RAM):
-
-- Each rolling window is a `collections.deque(maxlen=N)` — memory bounded.
-- Maximum total rolling window memory across all detectors and symbols:
-  `4 detectors × 10 symbols × max_window_size × 8 bytes (float)` ≈ negligible.
-- No background threads other than the Pub/Sub client's internal thread pool.
-- No disk writes from the listener process.
+- Rolling windows use `collections.deque` — memory bounded.
+- No disk writes from either VM process.
+- Detection VM: no outbound connection to Finnhub.
+- WebSocket VM: no detector state, minimal memory footprint.

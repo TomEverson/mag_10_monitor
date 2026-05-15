@@ -2,51 +2,85 @@
 
 ## Topics
 
-| Topic name                  | Published by | Consumed by         | Trigger |
-|-----------------------------|--------------|---------------------|---------|
-| `mag10-volume-spike`        | listener     | functions/volume    | On volume threshold breach |
-| `mag10-momentum-signal`     | listener     | functions/momentum  | On momentum threshold breach |
-| `mag10-volatility-spike`    | listener     | functions/volatility| On volatility threshold breach |
-| `mag10-sector-snapshot`     | listener     | functions/sector    | Every 60 seconds |
+| Topic name | Published by | Consumed by | Trigger |
+|---|---|---|---|
+| `mag10-raw-trades` | WebSocket VM | Bronze (Cloud Storage sub) + Detection VM (pull sub) | Every validated trade |
+| `mag10-processed-signals` | Detection VM | CF archive (push sub) | Every detected signal |
 
-All topic names are stored in environment variables — the listener reads them
-from `PUBSUB_TOPIC_VOLUME`, `PUBSUB_TOPIC_MOMENTUM`, `PUBSUB_TOPIC_VOLATILITY`,
-and `PUBSUB_TOPIC_SECTOR`. The Terraform infra creates the topics with these
-exact names.
+All topic names are stored in environment variables. Terraform creates the
+topics with these exact names.
+
+---
+
+## Subscriptions
+
+### mag10-raw-trades
+
+| Subscription ID | Type | Delivers to |
+|---|---|---|
+| `mag10-raw-trades-bronze-sub` | Cloud Storage | GCS `bronze/` prefix (native, no CF) |
+| `mag10-raw-trades-detection-sub` | Pull | Detection VM |
+
+The Cloud Storage subscription writes one GCS object per Pub/Sub message.
+The Detection VM uses a streaming pull subscription — it is not push-triggered.
+
+### mag10-processed-signals
+
+| Subscription ID | Type | Filter | Delivers to |
+|---|---|---|---|
+| `mag10-processed-signals-sub` | Push | none | CF archive |
+
+CF archive receives all signal types and routes internally by `signal_type`.
+No per-signal-type filtered subscriptions are needed since routing is done
+in code.
+
+---
+
+## Message Attributes
+
+The Detection VM sets a Pub/Sub **message attribute** on every message
+published to `mag10-processed-signals`:
+
+| Attribute | Values |
+|---|---|
+| `signal_type` | `volume_spike`, `momentum_signal`, `volatility_spike`, `sector_snapshot` |
+
+This attribute is available to CF archive without parsing the message body,
+enabling efficient routing.
 
 ---
 
 ## Message Format
 
 All messages:
-
 - Are JSON-encoded, UTF-8 bytes.
-- Carry no Pub/Sub message attributes (all metadata is in the JSON body).
 - Are published with no ordering key.
 
 ---
 
-## Subscriptions
+## Raw Trade Schema (mag10-raw-trades)
 
-Each Cloud Function is triggered by exactly one push subscription. Subscription
-names follow the convention `mag10-{signal}-sub`.
+```json
+{
+  "s": "NVDA",
+  "p": 875.30,
+  "v": 48200,
+  "t": 1715172043000
+}
+```
 
-| Subscription              | Delivers to         |
-|---------------------------|---------------------|
-| `mag10-volume-spike-sub`  | functions/volume    |
-| `mag10-momentum-signal-sub` | functions/momentum |
-| `mag10-volatility-spike-sub` | functions/volatility |
-| `mag10-sector-snapshot-sub` | functions/sector   |
-
-Subscriptions use **push delivery** to Cloud Function HTTP endpoints. The
-Cloud Functions Gen 2 framework handles Pub/Sub push message unwrapping
-automatically.
+| Field | Type | Description |
+|---|---|---|
+| `s` | string | Symbol |
+| `p` | float | Trade price (USD) |
+| `v` | float | Trade volume |
+| `t` | integer | Trade timestamp (Unix ms) |
 
 ---
 
-## Message Schemas
+## Processed Signal Schemas (mag10-processed-signals)
 
-### mag10-volume-spike
+### volume_spike
 
 ```json
 {
@@ -63,22 +97,22 @@ automatically.
 }
 ```
 
-| Field                | Type    | Required | Description |
-|----------------------|---------|----------|-------------|
-| `signal_type`        | string  | Yes      | Always `"volume_spike"` |
-| `symbol`             | string  | Yes      | Equity symbol |
-| `price`              | float   | Yes      | Trade price (USD) |
-| `trade_volume`       | float   | Yes      | Volume of triggering trade |
-| `avg_volume`         | float   | Yes      | Rolling window average volume (excl. current trade) |
-| `spike_ratio`        | float   | Yes      | `trade_volume / avg_volume` |
-| `window_trade_count` | integer | Yes      | Number of trades in the time window at signal time |
-| `window_span_secs`   | float   | Yes      | Actual time span of the window in seconds |
-| `trade_ts`           | integer | Yes      | Trade timestamp (Unix ms) |
-| `detected_at`        | string  | Yes      | ISO 8601 UTC signal emission time |
+| Field | Type | Description |
+|---|---|---|
+| `signal_type` | string | Always `"volume_spike"` |
+| `symbol` | string | Equity symbol |
+| `price` | float | Trade price (USD) |
+| `trade_volume` | float | Volume of triggering trade |
+| `avg_volume` | float | Rolling window average volume (excl. current trade) |
+| `spike_ratio` | float | `trade_volume / avg_volume` |
+| `window_trade_count` | integer | Trades in the window at signal time |
+| `window_span_secs` | float | Actual time span of the window in seconds |
+| `trade_ts` | integer | Trade timestamp (Unix ms) |
+| `detected_at` | string | ISO 8601 UTC signal emission time |
 
 ---
 
-### mag10-momentum-signal
+### momentum_signal
 
 ```json
 {
@@ -96,23 +130,23 @@ automatically.
 }
 ```
 
-| Field                  | Type    | Required | Description |
-|------------------------|---------|----------|-------------|
-| `signal_type`          | string  | Yes      | Always `"momentum_signal"` |
-| `symbol`               | string  | Yes      | Equity symbol |
-| `direction`            | string  | Yes      | `"UP"` or `"DOWN"` |
-| `candles_in_direction` | integer | Yes      | Number of 1-minute candles agreeing on direction |
-| `total_candles`        | integer | Yes      | Total candles evaluated (equals `MOMENTUM_CANDLE_WINDOW`) |
-| `oldest_open`          | float   | Yes      | Open price of the oldest candle in the window |
-| `latest_close`         | float   | Yes      | Close price of the newest candle in the window |
-| `pct_change`           | float   | Yes      | `(latest_close - oldest_open) / oldest_open * 100`, negative for DOWN |
-| `window_start_ts`      | integer | Yes      | Unix ms of the start of the oldest candle's minute |
-| `window_end_ts`        | integer | Yes      | Unix ms of the end of the newest candle's minute |
-| `detected_at`          | string  | Yes      | ISO 8601 UTC signal emission time |
+| Field | Type | Description |
+|---|---|---|
+| `signal_type` | string | Always `"momentum_signal"` |
+| `symbol` | string | Equity symbol |
+| `direction` | string | `"UP"` or `"DOWN"` |
+| `candles_in_direction` | integer | Candles agreeing on direction |
+| `total_candles` | integer | Total candles evaluated |
+| `oldest_open` | float | Open price of the oldest candle |
+| `latest_close` | float | Close price of the newest candle |
+| `pct_change` | float | `(latest_close - oldest_open) / oldest_open * 100` |
+| `window_start_ts` | integer | Unix ms start of oldest candle's minute |
+| `window_end_ts` | integer | Unix ms end of newest candle's minute |
+| `detected_at` | string | ISO 8601 UTC signal emission time |
 
 ---
 
-### mag10-volatility-spike
+### volatility_spike
 
 ```json
 {
@@ -129,22 +163,22 @@ automatically.
 }
 ```
 
-| Field                | Type    | Required | Description |
-|----------------------|---------|----------|-------------|
-| `signal_type`        | string  | Yes      | Always `"volatility_spike"` |
-| `symbol`             | string  | Yes      | Equity symbol |
-| `price`              | float   | Yes      | Triggering trade price |
-| `mean_price`         | float   | Yes      | Window mean price |
-| `std_dev`            | float   | Yes      | Population std dev of window prices |
-| `z_score`            | float   | Yes      | `abs(price - mean_price) / std_dev` |
-| `window_trade_count` | integer | Yes      | Number of trades in the time window at signal time |
-| `window_span_secs`   | float   | Yes      | Actual time span of the window in seconds |
-| `trade_ts`           | integer | Yes      | Trade timestamp (Unix ms) |
-| `detected_at`        | string  | Yes      | ISO 8601 UTC signal emission time |
+| Field | Type | Description |
+|---|---|---|
+| `signal_type` | string | Always `"volatility_spike"` |
+| `symbol` | string | Equity symbol |
+| `price` | float | Triggering trade price |
+| `mean_price` | float | Window mean price |
+| `std_dev` | float | Population std dev of window prices |
+| `z_score` | float | `abs(price - mean_price) / std_dev` |
+| `window_trade_count` | integer | Trades in the window at signal time |
+| `window_span_secs` | float | Actual time span of the window in seconds |
+| `trade_ts` | integer | Trade timestamp (Unix ms) |
+| `detected_at` | string | ISO 8601 UTC signal emission time |
 
 ---
 
-### mag10-sector-snapshot
+### sector_snapshot
 
 ```json
 {
@@ -165,31 +199,29 @@ automatically.
 }
 ```
 
-Top-level fields:
-
-| Field          | Type   | Required | Description |
-|----------------|--------|----------|-------------|
-| `signal_type`  | string | Yes      | Always `"sector_snapshot"` |
-| `snapshot_ts`  | string | Yes      | ISO 8601 UTC time of snapshot |
-| `symbols`      | array  | Yes      | Exactly 10 entries, one per tracked symbol |
+| Field | Type | Description |
+|---|---|---|
+| `signal_type` | string | Always `"sector_snapshot"` |
+| `snapshot_ts` | string | ISO 8601 UTC time of snapshot |
+| `symbols` | array | Exactly 10 entries, one per tracked symbol |
 
 Per-symbol fields:
 
-| Field           | Type            | Required | Description |
-|-----------------|-----------------|----------|-------------|
-| `symbol`        | string          | Yes      | Equity symbol |
-| `last_price`    | float or null   | Yes      | Most recent trade price; null if unseen |
-| `open_price`    | float or null   | Yes      | First trade price this session; null if unseen |
-| `pct_change`    | float or null   | Yes      | Session price change %; null if price unavailable |
-| `trade_count`   | integer         | Yes      | Trades received this session |
-| `total_volume`  | float           | Yes      | Cumulative session volume |
-| `last_trade_ts` | integer or null | Yes      | Last trade timestamp (Unix ms); null if unseen |
-| `is_stale`      | boolean         | Yes      | True if no trade in last `SECTOR_STALE_SECS` seconds |
+| Field | Type | Description |
+|---|---|---|
+| `symbol` | string | Equity symbol |
+| `last_price` | float or null | Most recent trade price |
+| `open_price` | float or null | First trade price this session |
+| `pct_change` | float or null | Session price change % |
+| `trade_count` | integer | Trades received this session |
+| `total_volume` | float | Cumulative session volume |
+| `last_trade_ts` | integer or null | Last trade timestamp (Unix ms) |
+| `is_stale` | boolean | True if no trade in last `SECTOR_STALE_SECS` seconds |
 
 ---
 
 ## Delivery Guarantees
 
-Pub/Sub provides at-least-once delivery. Cloud Functions must be idempotent —
-receiving the same message twice must produce the same outcome (see
-`spec/pipeline/functions.md`).
+Pub/Sub provides at-least-once delivery. CF archive and CF gcs-to-bq must
+both be idempotent — receiving the same message or GCS event twice must
+produce the same outcome.

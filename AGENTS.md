@@ -4,7 +4,7 @@
 
 **mag10-monitor** is a real-time market intelligence pipeline built on GCP.
 It connects to the Finnhub WebSocket feed, detects market signals across
-MAG 10 stocks, and surfaces them on a Looker Studio dashboard.
+MAG 10 stocks, and surfaces them on a Streamlit dashboard.
 
 This project follows **spec-driven development**. Before writing any
 implementation code, read the relevant spec file(s) in `/spec`. The spec
@@ -51,11 +51,13 @@ listener/ (GCP e2-micro VM)
            BigQuery (analytical tables)
                 │
                 ▼
-           Looker Studio Dashboard
-             • Sector Heat Map
-             • Volume Spotter
-             • Volatility Spike Detector
-             • Momentum Board
+           Streamlit Dashboard (Cloud Run)
+             • Live Signals
+             • Volume Analysis
+             • Momentum & Correlation
+             • Volatility & Sector
+             • Analytics
+             • News & Sentiment
 ```
 
 ---
@@ -132,11 +134,10 @@ mag10-monitor/
 │       └── gcs/
 │
 ├── dashboard/
-│   └── queries/                   # SQL queries backing Looker Studio boards
-│       ├── volume_spotter.sql
-│       ├── momentum_board.sql
-│       ├── volatility_spike.sql
-│       └── sector_heatmap.sql
+│   ├── streamlit_app.py           # Streamlit UI (6 tabs)
+│   ├── queries.py                 # All BigQuery query functions
+│   ├── Dockerfile
+│   └── pyproject.toml
 │
 ├── AGENTS.md                      # This file
 ├── README.md
@@ -184,8 +185,8 @@ get confirmation before writing implementation code.
 - Secrets are managed via GCP Secret Manager — never hardcoded or in .env files committed to git
 
 ### dashboard/queries/
-- Each `.sql` file corresponds to one Looker Studio board
-- Queries must reference partitioned BigQuery tables using `WHERE DATE(timestamp) = @date`
+- Each query function in `queries.py` corresponds to one dashboard component
+- Queries must reference partitioned BigQuery tables using date filters
   to avoid full table scans
 
 ---

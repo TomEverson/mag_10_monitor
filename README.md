@@ -1,6 +1,6 @@
 # mag10-monitor
 
-Real-time market intelligence pipeline for MAG 7 + AMD, AVGO, PLTR. Ingests live trades via Finnhub WebSocket, detects four signal types, and surfaces them on a Looker Studio dashboard backed by BigQuery — all on a single GCP e2-micro VM and four Cloud Functions.
+Real-time market intelligence pipeline for MAG 7 + AMD, AVGO, PLTR. Ingests live trades via Finnhub WebSocket, detects four signal types, and surfaces them on a Streamlit dashboard backed by BigQuery — all on a single GCP e2-micro VM, four Cloud Functions, and one Cloud Run service.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ listener/ (e2-micro VM)
            BigQuery (dataset: signals)
                 │
                 ▼
-           Looker Studio Dashboard
+           Streamlit Dashboard (Cloud Run)
 ```
 
 ## Prerequisites
@@ -125,16 +125,42 @@ cd infra && terraform apply
 
 ## Dashboard
 
-Open [Looker Studio](https://lookerstudio.google.com) and create four data sources, one per SQL file in `dashboard/queries/`. In each query, replace `{project}` with your GCP project ID and add a `DATE` parameter named `date` to enable partition pruning.
+The dashboard is a Streamlit app deployed on Cloud Run. Build and push the image, then set `dashboard_image` in `infra/terraform.tfvars` and re-apply Terraform.
 
-| Board | Query file | Chart type |
-|---|---|---|
-| Sector Heat Map | `sector_heatmap.sql` | Table / scorecard grid |
-| Volume Spotter | `volume_spotter.sql` | Time series + table |
-| Volatility Spike Detector | `volatility_spike.sql` | Scatter plot + table |
-| Momentum Board | `momentum_board.sql` | Bar chart + table |
+```bash
+cd dashboard
 
-Add a shared date-range control and a symbol multi-select filter across all boards.
+REGION=us-central1
+PROJECT_ID=YOUR_PROJECT_ID
+IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/mag10-images/dashboard:latest"
+
+gcloud auth configure-docker "${REGION}-docker.pkg.dev"
+docker build -t "${IMAGE}" .
+docker push "${IMAGE}"
+```
+
+Set the dashboard password:
+
+```bash
+echo -n "yourpassword" | \
+  gcloud secrets versions add mag10-dashboard-password \
+    --project=YOUR_PROJECT_ID \
+    --data-file=-
+```
+
+Then add to `infra/terraform.tfvars`:
+
+```hcl
+dashboard_image = "us-central1-docker.pkg.dev/YOUR_PROJECT_ID/mag10-images/dashboard:latest"
+```
+
+And re-apply:
+
+```bash
+cd infra && terraform apply
+```
+
+The dashboard URL is printed as a Terraform output. It has six tabs: Live Signals, Volume Analysis, Momentum & Correlation, Volatility & Sector, Analytics, and News & Sentiment.
 
 ## Local development
 
@@ -177,8 +203,9 @@ mag10-monitor/
 │   └── shared/      # Pydantic models + BigQuery client (copied at deploy time)
 ├── infra/           # Terraform — all GCP resources
 │   └── modules/     # vm, pubsub, bigquery, gcs
-├── dashboard/
-│   └── queries/     # SQL backing each Looker Studio board
+├── dashboard/       # Streamlit app (Cloud Run)
+│   ├── streamlit_app.py  # UI — 6 tabs
+│   └── queries.py        # BigQuery query functions
 └── scripts/
     └── deploy_functions.sh
 ```

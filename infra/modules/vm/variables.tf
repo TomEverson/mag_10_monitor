@@ -11,7 +11,7 @@ variable "region" {
 variable "zone" {
   description = "Compute zone for the listener VM"
   type        = string
-  default     = "us-central1-a"
+  default     = "asia-southeast1-b"
 }
 
 variable "env" {

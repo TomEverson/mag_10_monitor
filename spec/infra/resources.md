@@ -12,10 +12,10 @@
 
 ## GCP Project
 
-| Item        | Value |
-|-------------|-------|
-| Project ID  | Controlled by `var.gcp_project_id` |
-| Region      | `us-central1` (default; overridable via `var.region`) |
+| Item | Value |
+|---|---|
+| Project ID | `data-engineering-hs` |
+| Region | `asia-southeast1` (Singapore) |
 
 ---
 
@@ -25,33 +25,56 @@
 infra/
 ├── main.tf            # Root — calls all modules
 ├── variables.tf       # Input variables
-├── outputs.tf         # Outputs (e.g. Pub/Sub topic names, BQ dataset ID)
+├── outputs.tf         # Outputs
 └── modules/
-    ├── vm/            # Compute Engine VM (listener)
+    ├── vm/            # Two Compute Engine VMs (WebSocket + Detection)
     ├── pubsub/        # Pub/Sub topics and subscriptions
     ├── bigquery/      # BigQuery dataset and tables
-    └── gcs/           # GCS buckets
+    └── gcs/           # GCS bucket
 ```
 
 ---
 
-## Compute Engine VM (modules/vm)
+## Compute Engine VMs (modules/vm)
 
-| Attribute          | Value |
-|--------------------|-------|
-| Machine type       | `e2-micro` |
-| Zone               | `us-central1-a` |
-| OS image           | `cos-cloud/cos-stable` (Container-Optimised OS) |
-| Container image    | Docker image from Artifact Registry |
-| Service account    | `mag10-listener-sa` with Pub/Sub Publisher role |
-| Network            | Default VPC |
-| External IP        | Ephemeral (needed for outbound WebSocket to Finnhub) |
-| Startup script     | Pulls and runs the listener container |
-| Metadata           | `FINNHUB_API_KEY` secret version reference |
+Two VMs, both e2-micro.
+
+### WebSocket VM
+
+| Attribute | Value |
+|---|---|
+| Name | `mag10-websocket-vm-prod` |
+| Machine type | `e2-micro` |
+| Zone | `asia-southeast1-b` |
+| OS image | `cos-cloud/cos-stable` |
+| Container image | `mag10-images/websocket:latest` from Artifact Registry |
+| Service account | `mag10-websocket-sa` |
+| External IP | Ephemeral (required for outbound WebSocket to Finnhub) |
 
 **Service account roles:**
-- `roles/pubsub.publisher` — publish to all four topics
-- `roles/secretmanager.secretAccessor` — read `FINNHUB_API_KEY`
+- `roles/pubsub.publisher` — publish to `mag10-raw-trades`
+- `roles/secretmanager.secretAccessor` — read `mag10-finnhub-key`
+- `roles/logging.logWriter`
+- `roles/artifactregistry.reader`
+
+### Detection VM
+
+| Attribute | Value |
+|---|---|
+| Name | `mag10-detection-vm-prod` |
+| Machine type | `e2-micro` |
+| Zone | `asia-southeast1-b` |
+| OS image | `cos-cloud/cos-stable` |
+| Container image | `mag10-images/detection:latest` from Artifact Registry |
+| Service account | `mag10-detection-sa` |
+| External IP | Ephemeral (required for outbound Pub/Sub pull) |
+
+**Service account roles:**
+- `roles/pubsub.subscriber` — pull from `mag10-raw-trades-detection-sub`
+- `roles/pubsub.publisher` — publish to `mag10-processed-signals`
+- `roles/storage.objectViewer` — read Bronze from GCS for warm-start
+- `roles/logging.logWriter`
+- `roles/artifactregistry.reader`
 
 ---
 
@@ -59,29 +82,60 @@ infra/
 
 ### Topics
 
-| Resource name              | Topic ID                   |
-|----------------------------|----------------------------|
-| `mag10-volume-spike`       | `mag10-volume-spike`       |
-| `mag10-momentum-signal`    | `mag10-momentum-signal`    |
-| `mag10-volatility-spike`   | `mag10-volatility-spike`   |
-| `mag10-sector-snapshot`    | `mag10-sector-snapshot`    |
-
-All topics use the default message retention (7 days).
+| Topic ID | Published by | Message retention |
+|---|---|---|
+| `mag10-raw-trades` | WebSocket VM | 7 days |
+| `mag10-processed-signals` | Detection VM | 7 days |
 
 ### Subscriptions
 
-| Subscription ID               | Topic                      | Delivery | Endpoint |
-|-------------------------------|----------------------------|----------|----------|
-| `mag10-volume-spike-sub`      | `mag10-volume-spike`       | Push     | Cloud Function URL |
-| `mag10-momentum-signal-sub`   | `mag10-momentum-signal`    | Push     | Cloud Function URL |
-| `mag10-volatility-spike-sub`  | `mag10-volatility-spike`   | Push     | Cloud Function URL |
-| `mag10-sector-snapshot-sub`   | `mag10-sector-snapshot`    | Push     | Cloud Function URL |
+| Subscription ID | Topic | Type | Delivers to |
+|---|---|---|---|
+| `mag10-raw-trades-bronze-sub` | `mag10-raw-trades` | Cloud Storage | GCS `bronze/` prefix |
+| `mag10-raw-trades-detection-sub` | `mag10-raw-trades` | Pull | Detection VM |
+| `mag10-processed-signals-sub` | `mag10-processed-signals` | Push | CF archive URL |
 
-Subscription settings:
+**Cloud Storage subscription settings (`mag10-raw-trades-bronze-sub`):**
+- Bucket: `mag-10-raw`
+- Object prefix: `bronze/`
+- Max duration: 1 second
+- Filename suffix: `.json`
+
+**Pull subscription settings (`mag10-raw-trades-detection-sub`):**
 - Ack deadline: 60 seconds
 - Message retention: 7 days
-- Dead-letter topic: none (retry is sufficient; messages expire after 7 days)
 - Retry policy: exponential backoff, 10s–600s
+
+**Push subscription settings (`mag10-processed-signals-sub`):**
+- Ack deadline: 60 seconds
+- Message retention: 7 days
+- Retry policy: exponential backoff, 10s–600s
+- Dead-letter topic: none
+
+---
+
+## Cloud Functions (modules/functions)
+
+Two functions, both Gen 2.
+
+| Function name | Trigger | Service account |
+|---|---|---|
+| `mag10-cf-archive` | Pub/Sub push (`mag10-processed-signals-sub`) | `mag10-functions-sa` |
+| `mag10-cf-gcs-to-bq` | GCS object finalise (`silver/`) | `mag10-functions-sa` |
+
+**Shared function settings:**
+- Runtime: Python 3.12
+- Memory: 256 MB
+- Timeout: 60 seconds
+- Min instances: 0
+- Region: `asia-southeast1`
+
+**Service account roles (`mag10-functions-sa`):**
+- `roles/storage.objectCreator` — write to GCS Silver (`cf-archive`)
+- `roles/storage.objectViewer` — read from GCS Silver (`cf-gcs-to-bq`)
+- `roles/bigquery.dataEditor` — stream insert to BQ (`cf-gcs-to-bq`)
+- `roles/logging.logWriter`
+- `roles/run.invoker` — allows Pub/Sub push to invoke the function
 
 ---
 
@@ -89,94 +143,96 @@ Subscription settings:
 
 ### Dataset
 
-| Attribute        | Value |
-|-----------------|-------|
-| Dataset ID       | Controlled by `var.bq_dataset` (default: `signals`) |
-| Location         | `US` |
-| Default table expiry | None (data retained indefinitely) |
+| Attribute | Value |
+|---|---|
+| Dataset ID | Controlled by `var.bq_dataset` (default: `signals`) |
+| Location | `asia-southeast1` |
+| Default table expiry | None |
 
 ### Tables
 
-Created by Terraform using schema JSON files co-located with the module.
-
-| Table ID             | Schema file              | Partition field | Partition type | Cluster fields |
-|----------------------|--------------------------|-----------------|----------------|----------------|
-| `volume_spikes`      | `schema_volume.json`     | `timestamp`     | DAY            | `symbol`       |
-| `momentum_signals`   | `schema_momentum.json`   | `timestamp`     | DAY            | `symbol`, `direction` |
-| `volatility_spikes`  | `schema_volatility.json` | `timestamp`     | DAY            | `symbol`       |
-| `sector_snapshots`   | `schema_sector.json`     | `snapshot_ts`   | DAY            | `symbol`       |
+| Table ID | Partition field | Partition type | Cluster fields |
+|---|---|---|---|
+| `volume_spikes` | `timestamp` | DAY | `symbol` |
+| `momentum_signals` | `window_end_ts` | DAY | `symbol`, `direction` |
+| `volatility_spikes` | `timestamp` | DAY | `symbol` |
+| `sector_snapshots` | `snapshot_ts` | DAY | `symbol` |
 
 Full column definitions are in `spec/pipeline/bigquery.md`.
-
-**Service account for Cloud Functions:**  
-`mag10-functions-sa` with `roles/bigquery.dataEditor` on the dataset.
 
 ---
 
 ## GCS (modules/gcs)
 
-### Raw event archive bucket
+### Single bucket, two prefixes
 
-| Attribute       | Value |
-|-----------------|-------|
-| Bucket name     | `mag10-raw-{gcp_project_id}` (globally unique via project ID suffix) |
-| Location        | `US-CENTRAL1` |
-| Storage class   | `STANDARD` |
-| Lifecycle rule  | Delete objects older than 90 days |
-| Versioning      | Disabled |
-| Public access   | Blocked |
+| Attribute | Value |
+|---|---|
+| Bucket name | `mag-10-raw` |
+| Location | `asia-southeast1` |
+| Storage class | `STANDARD` |
+| Versioning | Disabled |
+| Public access | Blocked |
 
-Object path conventions are defined in `spec/pipeline/functions.md`.
+| Prefix | Written by | Contents | Retention |
+|---|---|---|---|
+| `bronze/` | Pub/Sub Cloud Storage sub | Raw validated trades | 90 days |
+| `silver/` | CF archive | Detected signals (JSON) | 90 days |
 
-**Service account:**  
-`mag10-functions-sa` with `roles/storage.objectCreator` on this bucket.
+Lifecycle rules delete objects in both prefixes after 90 days.
 
 ---
 
 ## Secret Manager
 
-Secrets are created and versioned manually (not by Terraform) to avoid storing
-secret values in Terraform state.
+| Secret name | Consumed by | Description |
+|---|---|---|
+| `mag10-finnhub-key` | WebSocket VM | Finnhub API key |
+| `mag10-dashboard-password` | Dashboard (Cloud Run) | Dashboard login password |
 
-| Secret name         | Consumed by | Description |
-|---------------------|-------------|-------------|
-| `mag10-finnhub-key` | VM listener | Finnhub API key |
-
-Terraform creates the secret resource (empty); the actual value is added via
+Terraform creates the secret resources (empty). Values are added via
 `gcloud secrets versions add` outside of Terraform.
 
 ---
 
 ## Artifact Registry
 
-| Repository name | Format | Region       |
-|-----------------|--------|--------------|
-| `mag10-images`  | Docker | `us-central1` |
+| Repository name | Format | Region |
+|---|---|---|
+| `mag10-images` | Docker | `asia-southeast1` |
 
-The listener Docker image is pushed here and referenced by the VM startup
-configuration.
+Images stored:
+- `mag10-images/websocket:latest` — WebSocket VM container
+- `mag10-images/detection:latest` — Detection VM container
+- `mag10-images/dashboard:latest` — Streamlit dashboard container
 
 ---
 
 ## Variables (`infra/variables.tf`)
 
-| Variable            | Type   | Default       | Description |
-|---------------------|--------|---------------|-------------|
-| `gcp_project_id`    | string | (required)    | GCP project ID |
-| `region`            | string | `us-central1` | Default region |
-| `zone`              | string | `us-central1-a` | VM zone |
-| `env`               | string | `prod`        | Environment suffix for resource names |
-| `bq_dataset`        | string | `signals`     | BigQuery dataset ID |
-| `listener_image`    | string | (required)    | Full Docker image URI for the listener |
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `gcp_project_id` | string | (required) | GCP project ID |
+| `region` | string | `asia-southeast1` | Default region |
+| `zone` | string | `asia-southeast1-b` | VM zone |
+| `env` | string | `prod` | Environment suffix |
+| `bq_dataset` | string | `signals` | BigQuery dataset ID |
+| `websocket_image` | string | (required) | WebSocket VM Docker image URI |
+| `detection_image` | string | (required) | Detection VM Docker image URI |
+| `dashboard_image` | string | (required) | Dashboard Docker image URI |
+| `volume_function_url` | string | (required) | CF archive URL (for Pub/Sub push sub) |
+| `gcs_to_bq_function_url` | string | (required) | CF gcs-to-bq URL |
 
 ---
 
 ## Outputs (`infra/outputs.tf`)
 
-| Output                  | Description |
-|-------------------------|-------------|
-| `vm_name`               | Compute Engine instance name |
-| `pubsub_topics`         | Map of topic name → full topic path |
-| `bq_dataset_id`         | BigQuery dataset ID |
-| `gcs_raw_bucket`        | GCS raw archive bucket name |
-| `artifact_registry_repo`| Artifact Registry repository URL |
+| Output | Description |
+|---|---|
+| `websocket_vm_name` | WebSocket VM instance name |
+| `detection_vm_name` | Detection VM instance name |
+| `pubsub_topics` | Map of topic name → full topic path |
+| `bq_dataset_id` | BigQuery dataset ID |
+| `gcs_bucket` | GCS bucket name |
+| `artifact_registry_repo` | Artifact Registry repository URL |
+| `dashboard_url` | Cloud Run dashboard service URL |

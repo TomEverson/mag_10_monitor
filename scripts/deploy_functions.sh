@@ -14,7 +14,7 @@
 set -euo pipefail
 
 : "${GCP_PROJECT_ID:?GCP_PROJECT_ID must be set}"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-asia-southeast1}"
 BQ_DATASET="${BQ_DATASET:-signals}"
 GCS_BUCKET_RAW="mag-10-raw"
 SA_EMAIL="mag10-functions-sa@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
