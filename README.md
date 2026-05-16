@@ -69,12 +69,12 @@ Pub/Sub: mag10-raw-trades
 
 ## Deployment
 
-Deployment is a two-phase process. Phase 1 provisions infrastructure and VMs; Phase 2 deploys Cloud Functions and switches Pub/Sub to push mode.
-
 ### Step 1 — Store secrets
 
+Do this once before the first deploy. The Secret Manager resources are created by Terraform but their values must be set manually.
+
 ```bash
-# Finnhub API key (required by WebSocket VM)
+# Finnhub API key (required by the WebSocket VM)
 echo -n "YOUR_FINNHUB_KEY" | \
   gcloud secrets versions add mag10-finnhub-key \
     --project=YOUR_PROJECT_ID --data-file=-
@@ -85,71 +85,54 @@ echo -n "yourpassword" | \
     --project=YOUR_PROJECT_ID --data-file=-
 ```
 
-### Step 2 — Build and push Docker images
-
-Uses Cloud Build — no local Docker required.
-
-```bash
-PROJECT=YOUR_PROJECT_ID
-REGION=asia-southeast1
-REPO="${REGION}-docker.pkg.dev/${PROJECT}/mag10-images"
-
-gcloud builds submit --project=$PROJECT --region=$REGION \
-  --tag="${REPO}/websocket:latest" websocket/
-
-gcloud builds submit --project=$PROJECT --region=$REGION \
-  --tag="${REPO}/detection:latest" detection/
-
-gcloud builds submit --project=$PROJECT --region=$REGION \
-  --tag="${REPO}/dashboard:latest" dashboard/
-```
-
-### Step 3 — First Terraform apply (infrastructure + VMs)
-
-```bash
-cd infra
-
-cat > terraform.tfvars <<EOF
-gcp_project_id  = "YOUR_PROJECT_ID"
-websocket_image = "asia-southeast1-docker.pkg.dev/YOUR_PROJECT_ID/mag10-images/websocket:latest"
-detection_image = "asia-southeast1-docker.pkg.dev/YOUR_PROJECT_ID/mag10-images/detection:latest"
-dashboard_image = "asia-southeast1-docker.pkg.dev/YOUR_PROJECT_ID/mag10-images/dashboard:latest"
-EOF
-
-terraform init
-terraform apply
-```
-
-This creates: Pub/Sub topics and subscriptions (archive in pull mode), GCS bucket, BigQuery tables, Artifact Registry, both VMs, service accounts, and Cloud Run dashboard.
-
-### Step 4 — Deploy Cloud Functions
+### Step 2 — Run the deploy script
 
 ```bash
 export GCP_PROJECT_ID=YOUR_PROJECT_ID
-./scripts/deploy_functions.sh
+./scripts/deploy.sh
 ```
 
-The script deploys both functions and prints the archive function URL:
+That's it. The script handles everything in four phases:
+
+| Phase | What it does |
+|-------|-------------|
+| 1 — Build images | Submits `websocket`, `detection`, and `dashboard` to Cloud Build in parallel (no local Docker needed) |
+| 2 — Terraform | `terraform init && terraform apply` — provisions VMs, Pub/Sub, GCS, BigQuery, Cloud Run, IAM |
+| 3 — Cloud Functions | Deploys `mag10-archive` (Pub/Sub push) and `mag10-gcs-to-bq` (GCS Eventarc trigger) |
+| 4 — Wire push | Extracts the archive function URL, updates `terraform.tfvars`, re-applies to switch Pub/Sub to push mode |
+
+On completion it prints:
 
 ```
-archive_function_url = "https://mag10-archive-<hash>-as.a.run.app"
+Deployment complete.
+  Dashboard   → https://mag10-dashboard-<hash>-as.a.run.app
+  WebSocket VM → mag10-websocket-prod
+  Detection VM → mag10-detection-prod
 ```
 
-### Step 5 — Second Terraform apply (enable push delivery)
-
-Add the archive URL to `infra/terraform.tfvars`:
-
-```hcl
-archive_function_url = "https://mag10-archive-<hash>-as.a.run.app"
-```
-
-Then re-apply to switch the Pub/Sub subscription from pull to push:
+### Re-deploying after changes
 
 ```bash
-cd infra && terraform apply
+# Code changed in one or more services — rebuild images and redeploy functions
+export GCP_PROJECT_ID=YOUR_PROJECT_ID
+./scripts/deploy.sh
+
+# Infra-only change (no code changes) — skip image builds
+./scripts/deploy.sh --skip-images
+
+# Functions-only change — skip images and Terraform
+./scripts/deploy.sh --skip-images --skip-tf
 ```
 
-The pipeline is now fully live.
+To reset a VM so it pulls the latest image immediately:
+
+```bash
+gcloud compute instances reset mag10-websocket-prod \
+  --project=YOUR_PROJECT_ID --zone=asia-southeast1-b
+
+gcloud compute instances reset mag10-detection-prod \
+  --project=YOUR_PROJECT_ID --zone=asia-southeast1-b
+```
 
 ## Repository layout
 
@@ -169,24 +152,18 @@ mag10-monitor/
 ├── infra/             # Terraform — all GCP resources
 │   └── modules/       # vm, pubsub, bigquery, gcs
 └── scripts/
-    └── deploy_functions.sh
+    ├── deploy.sh            # Full deploy (images → terraform → functions → push wiring)
+    └── deploy_functions.sh  # Functions-only deploy (called by deploy.sh)
 ```
 
 ## Rebuilding a service
 
-After code changes, rebuild the image and reset the VM:
+After code changes run `./scripts/deploy.sh` (see flags above). To reset a VM manually without a full deploy:
 
 ```bash
-# Rebuild (e.g. websocket)
-gcloud builds submit --project=$PROJECT --region=$REGION \
-  --tag="${REPO}/websocket:latest" websocket/
-
-# Reset VM to pull new image
 gcloud compute instances reset mag10-websocket-prod \
-  --project=$PROJECT --zone=asia-southeast1-b
+  --project=YOUR_PROJECT_ID --zone=asia-southeast1-b
 ```
-
-For Cloud Functions, re-run `./scripts/deploy_functions.sh`.
 
 ## Local development
 
