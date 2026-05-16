@@ -9,7 +9,7 @@ variable "region" {
 }
 
 variable "zone" {
-  description = "Compute zone for the listener VM"
+  description = "Compute zone for the VM"
   type        = string
   default     = "asia-southeast1-b"
 }
@@ -20,13 +20,13 @@ variable "env" {
   default     = "prod"
 }
 
-variable "listener_image" {
-  description = "Full Artifact Registry Docker image URI for the listener"
+variable "image" {
+  description = "Full Artifact Registry Docker image URI for the websocket service"
   type        = string
 }
 
 variable "service_account_email" {
-  description = "Service account email for the listener VM"
+  description = "Service account email for the VM"
   type        = string
 }
 
@@ -36,22 +36,8 @@ variable "finnhub_secret_name" {
   default     = "mag10-finnhub-key"
 }
 
-variable "pubsub_topic_volume" {
-  type    = string
-  default = "mag10-volume-spike"
-}
-
-variable "pubsub_topic_momentum" {
-  type    = string
-  default = "mag10-momentum-signal"
-}
-
-variable "pubsub_topic_volatility" {
-  type    = string
-  default = "mag10-volatility-spike"
-}
-
-variable "pubsub_topic_sector" {
-  type    = string
-  default = "mag10-sector-snapshot"
+variable "pubsub_topic_raw_trades" {
+  description = "Pub/Sub topic name for raw trades"
+  type        = string
+  default     = "mag10-raw-trades"
 }

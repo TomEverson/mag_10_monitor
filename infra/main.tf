@@ -33,7 +33,34 @@ locals {
     "cloudfunctions.googleapis.com",
     "run.googleapis.com",
     "cloudbuild.googleapis.com",
+    "eventarc.googleapis.com",
   ]
+
+  detection_startup_script = <<-EOT
+    #!/bin/bash
+    set -e
+
+    TOKEN=$(curl -sf "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+      -H "Metadata-Flavor: Google" | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+
+    export DOCKER_CONFIG=/tmp/docker-config
+    mkdir -p $DOCKER_CONFIG
+    echo "$TOKEN" | docker login -u oauth2accesstoken --password-stdin ${var.region}-docker.pkg.dev
+
+    docker pull ${var.detection_image}
+    docker rm -f mag10-detection 2>/dev/null || true
+
+    docker run -d \
+      --name mag10-detection \
+      --restart always \
+      --log-driver=gcplogs \
+      --log-opt gcp-project=${var.gcp_project_id} \
+      -e GCP_PROJECT_ID="${var.gcp_project_id}" \
+      -e GCS_BUCKET="${module.gcs.bucket_name}" \
+      -e PUBSUB_SUBSCRIPTION_RAW="${module.pubsub.detection_subscription_name}" \
+      -e PUBSUB_TOPIC_PROCESSED="${module.pubsub.processed_signals_topic_name}" \
+      ${var.detection_image}
+  EOT
 }
 
 resource "google_project_service" "apis" {
@@ -44,42 +71,86 @@ resource "google_project_service" "apis" {
 
 # ── Service accounts ──────────────────────────────────────────────────────────
 
-resource "google_service_account" "listener" {
-  account_id   = "mag10-listener-sa"
-  display_name = "MAG10 Listener"
-  description  = "Used by the e2-micro VM running the Finnhub WebSocket listener"
+resource "google_service_account" "websocket" {
+  account_id   = "mag10-websocket-sa"
+  display_name = "MAG10 WebSocket"
+  description  = "Used by the e2-micro VM running the Finnhub WebSocket ingest service"
+}
+
+resource "google_service_account" "detection" {
+  account_id   = "mag10-detection-sa"
+  display_name = "MAG10 Detection"
+  description  = "Used by the e2-micro VM running the signal detection service"
 }
 
 resource "google_service_account" "functions" {
   account_id   = "mag10-functions-sa"
   display_name = "MAG10 Cloud Functions"
-  description  = "Used by all four signal-processing Cloud Functions"
+  description  = "Used by the archive and gcs-to-bq Cloud Functions"
 }
 
-# ── IAM — listener SA ────────────────────────────────────────────────────────
+resource "google_service_account" "dashboard" {
+  account_id   = "mag10-dashboard-sa"
+  display_name = "MAG10 Dashboard"
+  description  = "Used by the Cloud Run dashboard service"
+}
 
-resource "google_project_iam_member" "listener_pubsub_publisher" {
+# ── IAM — websocket SA ────────────────────────────────────────────────────────
+
+resource "google_project_iam_member" "websocket_pubsub_publisher" {
   project = var.gcp_project_id
   role    = "roles/pubsub.publisher"
-  member  = "serviceAccount:${google_service_account.listener.email}"
+  member  = "serviceAccount:${google_service_account.websocket.email}"
 }
 
-resource "google_project_iam_member" "listener_secret_accessor" {
+resource "google_project_iam_member" "websocket_secret_accessor" {
   project = var.gcp_project_id
   role    = "roles/secretmanager.secretAccessor"
-  member  = "serviceAccount:${google_service_account.listener.email}"
+  member  = "serviceAccount:${google_service_account.websocket.email}"
 }
 
-resource "google_project_iam_member" "listener_log_writer" {
+resource "google_project_iam_member" "websocket_log_writer" {
   project = var.gcp_project_id
   role    = "roles/logging.logWriter"
-  member  = "serviceAccount:${google_service_account.listener.email}"
+  member  = "serviceAccount:${google_service_account.websocket.email}"
 }
 
-resource "google_project_iam_member" "listener_ar_reader" {
+resource "google_project_iam_member" "websocket_ar_reader" {
   project = var.gcp_project_id
   role    = "roles/artifactregistry.reader"
-  member  = "serviceAccount:${google_service_account.listener.email}"
+  member  = "serviceAccount:${google_service_account.websocket.email}"
+}
+
+# ── IAM — detection SA ────────────────────────────────────────────────────────
+
+resource "google_project_iam_member" "detection_pubsub_subscriber" {
+  project = var.gcp_project_id
+  role    = "roles/pubsub.subscriber"
+  member  = "serviceAccount:${google_service_account.detection.email}"
+}
+
+resource "google_project_iam_member" "detection_pubsub_publisher" {
+  project = var.gcp_project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:${google_service_account.detection.email}"
+}
+
+resource "google_project_iam_member" "detection_gcs_viewer" {
+  project = var.gcp_project_id
+  role    = "roles/storage.objectViewer"
+  member  = "serviceAccount:${google_service_account.detection.email}"
+}
+
+resource "google_project_iam_member" "detection_log_writer" {
+  project = var.gcp_project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.detection.email}"
+}
+
+resource "google_project_iam_member" "detection_ar_reader" {
+  project = var.gcp_project_id
+  role    = "roles/artifactregistry.reader"
+  member  = "serviceAccount:${google_service_account.detection.email}"
 }
 
 # ── IAM — functions SA ───────────────────────────────────────────────────────
@@ -90,9 +161,16 @@ resource "google_project_iam_member" "functions_bq_editor" {
   member  = "serviceAccount:${google_service_account.functions.email}"
 }
 
+# archive CF writes Silver files; gcs-to-bq CF reads them
 resource "google_project_iam_member" "functions_gcs_creator" {
   project = var.gcp_project_id
   role    = "roles/storage.objectCreator"
+  member  = "serviceAccount:${google_service_account.functions.email}"
+}
+
+resource "google_project_iam_member" "functions_gcs_viewer" {
+  project = var.gcp_project_id
+  role    = "roles/storage.objectViewer"
   member  = "serviceAccount:${google_service_account.functions.email}"
 }
 
@@ -100,6 +178,20 @@ resource "google_project_iam_member" "functions_log_writer" {
   project = var.gcp_project_id
   role    = "roles/logging.logWriter"
   member  = "serviceAccount:${google_service_account.functions.email}"
+}
+
+# Required for GCS Eventarc trigger on the gcs-to-bq function
+resource "google_project_iam_member" "functions_eventarc_receiver" {
+  project = var.gcp_project_id
+  role    = "roles/eventarc.eventReceiver"
+  member  = "serviceAccount:${google_service_account.functions.email}"
+}
+
+# GCS service agent must publish Pub/Sub events for Eventarc GCS triggers
+resource "google_project_iam_member" "gcs_sa_pubsub_publisher" {
+  project = var.gcp_project_id
+  role    = "roles/pubsub.publisher"
+  member  = "serviceAccount:service-214081441484@gs-project-accounts.iam.gserviceaccount.com"
 }
 
 # Allows Pub/Sub push subscriptions to invoke Cloud Run-backed functions via OIDC
@@ -116,37 +208,7 @@ resource "google_service_account_iam_member" "pubsub_token_creator" {
   member             = "serviceAccount:service-214081441484@gcp-sa-pubsub.iam.gserviceaccount.com"
 }
 
-# ── Secret Manager ────────────────────────────────────────────────────────────
-# Creates the secret resource only. Add the actual value with:
-#   gcloud secrets versions add mag10-finnhub-key --data-file=-
-
-resource "google_secret_manager_secret" "finnhub_key" {
-  secret_id = "mag10-finnhub-key"
-  replication {
-    auto {}
-  }
-  depends_on = [google_project_service.apis]
-}
-
-# ── Artifact Registry ─────────────────────────────────────────────────────────
-
-resource "google_artifact_registry_repository" "images" {
-  location      = var.region
-  repository_id = "mag10-images"
-  format        = "DOCKER"
-  description   = "Docker images for MAG10 monitor services"
-  depends_on    = [google_project_service.apis]
-}
-
-# ── Modules ───────────────────────────────────────────────────────────────────
-
-# ── Dashboard service account ─────────────────────────────────────────────────
-
-resource "google_service_account" "dashboard" {
-  account_id   = "mag10-dashboard-sa"
-  display_name = "MAG10 Dashboard"
-  description  = "Used by the Cloud Run dashboard service"
-}
+# ── IAM — dashboard SA ───────────────────────────────────────────────────────
 
 resource "google_project_iam_member" "dashboard_bq_viewer" {
   project = var.gcp_project_id
@@ -172,9 +234,18 @@ resource "google_project_iam_member" "dashboard_secret_accessor" {
   member  = "serviceAccount:${google_service_account.dashboard.email}"
 }
 
-# ── Dashboard password secret ─────────────────────────────────────────────────
-# After apply, set the value with:
+# ── Secret Manager ────────────────────────────────────────────────────────────
+# Add the actual value with:
+#   gcloud secrets versions add mag10-finnhub-key --data-file=-
 #   echo -n "yourpassword" | gcloud secrets versions add mag10-dashboard-password --data-file=-
+
+resource "google_secret_manager_secret" "finnhub_key" {
+  secret_id = "mag10-finnhub-key"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.apis]
+}
 
 resource "google_secret_manager_secret" "dashboard_password" {
   secret_id = "mag10-dashboard-password"
@@ -182,6 +253,130 @@ resource "google_secret_manager_secret" "dashboard_password" {
     auto {}
   }
   depends_on = [google_project_service.apis]
+}
+
+# ── Artifact Registry ─────────────────────────────────────────────────────────
+
+resource "google_artifact_registry_repository" "images" {
+  location      = var.region
+  repository_id = "mag10-images"
+  format        = "DOCKER"
+  description   = "Docker images for MAG10 monitor services"
+  depends_on    = [google_project_service.apis]
+}
+
+# ── Modules ───────────────────────────────────────────────────────────────────
+
+module "gcs" {
+  source = "./modules/gcs"
+
+  project_id = var.gcp_project_id
+  region     = var.region
+
+  depends_on = [google_project_service.apis]
+}
+
+# Pub/Sub Cloud Storage subscription writes Bronze files; the Pub/Sub service
+# agent needs both legacyBucketReader and objectCreator at the bucket level.
+resource "google_storage_bucket_iam_member" "pubsub_gcs_creator" {
+  bucket = module.gcs.bucket_name
+  role   = "roles/storage.objectCreator"
+  member = "serviceAccount:service-214081441484@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+resource "google_storage_bucket_iam_member" "pubsub_gcs_reader" {
+  bucket = module.gcs.bucket_name
+  role   = "roles/storage.legacyBucketReader"
+  member = "serviceAccount:service-214081441484@gcp-sa-pubsub.iam.gserviceaccount.com"
+}
+
+module "pubsub" {
+  source = "./modules/pubsub"
+
+  functions_sa_email   = google_service_account.functions.email
+  gcs_bucket           = module.gcs.bucket_name
+  gcs_bucket_resource  = module.gcs
+  archive_function_url = var.archive_function_url
+
+  depends_on = [
+    google_project_service.apis,
+    google_storage_bucket_iam_member.pubsub_gcs_creator,
+    google_storage_bucket_iam_member.pubsub_gcs_reader,
+  ]
+}
+
+module "bigquery" {
+  source = "./modules/bigquery"
+
+  project_id = var.gcp_project_id
+  dataset_id = var.bq_dataset
+
+  depends_on = [google_project_service.apis]
+}
+
+module "vm" {
+  source = "./modules/vm"
+
+  project_id              = var.gcp_project_id
+  region                  = var.region
+  zone                    = var.zone
+  env                     = var.env
+  image                   = var.websocket_image
+  service_account_email   = google_service_account.websocket.email
+  pubsub_topic_raw_trades = module.pubsub.raw_trades_topic_name
+
+  depends_on = [
+    google_project_service.apis,
+    google_secret_manager_secret.finnhub_key,
+    module.pubsub,
+  ]
+}
+
+# ── Detection VM ──────────────────────────────────────────────────────────────
+
+resource "google_compute_instance" "detection" {
+  name         = "mag10-detection-${var.env}"
+  machine_type = "e2-micro"
+  zone         = var.zone
+
+  boot_disk {
+    initialize_params {
+      image = "cos-cloud/cos-stable"
+      size  = 10
+    }
+  }
+
+  network_interface {
+    network = "default"
+    access_config {}
+  }
+
+  service_account {
+    email  = google_service_account.detection.email
+    scopes = ["cloud-platform"]
+  }
+
+  metadata = {
+    startup-script         = local.detection_startup_script
+    google-logging-enabled = "true"
+  }
+
+  tags = ["mag10-detection"]
+
+  lifecycle {
+    replace_triggered_by = [
+      terraform_data.detection_image_trigger
+    ]
+  }
+
+  depends_on = [
+    google_project_service.apis,
+    module.pubsub,
+  ]
+}
+
+resource "terraform_data" "detection_image_trigger" {
+  input = var.detection_image
 }
 
 # ── Cloud Run — dashboard ─────────────────────────────────────────────────────
@@ -253,65 +448,10 @@ resource "google_cloud_run_v2_service" "dashboard" {
   ]
 }
 
-# Public access — password auth is handled inside the app
 resource "google_cloud_run_v2_service_iam_member" "dashboard_public" {
   project  = google_cloud_run_v2_service.dashboard.project
   location = google_cloud_run_v2_service.dashboard.location
   name     = google_cloud_run_v2_service.dashboard.name
   role     = "roles/run.invoker"
   member   = "allUsers"
-}
-
-# ── Modules ───────────────────────────────────────────────────────────────────
-
-module "pubsub" {
-  source = "./modules/pubsub"
-
-  functions_sa_email      = google_service_account.functions.email
-  volume_function_url     = var.volume_function_url
-  momentum_function_url   = var.momentum_function_url
-  volatility_function_url = var.volatility_function_url
-  sector_function_url     = var.sector_function_url
-
-  depends_on = [google_project_service.apis]
-}
-
-module "bigquery" {
-  source = "./modules/bigquery"
-
-  project_id = var.gcp_project_id
-  dataset_id = var.bq_dataset
-
-  depends_on = [google_project_service.apis]
-}
-
-module "gcs" {
-  source = "./modules/gcs"
-
-  project_id = var.gcp_project_id
-  region     = var.region
-
-  depends_on = [google_project_service.apis]
-}
-
-module "vm" {
-  source = "./modules/vm"
-
-  project_id            = var.gcp_project_id
-  region                = var.region
-  zone                  = var.zone
-  env                   = var.env
-  listener_image        = var.listener_image
-  service_account_email = google_service_account.listener.email
-
-  pubsub_topic_volume     = module.pubsub.topic_names["volume"]
-  pubsub_topic_momentum   = module.pubsub.topic_names["momentum"]
-  pubsub_topic_volatility = module.pubsub.topic_names["volatility"]
-  pubsub_topic_sector     = module.pubsub.topic_names["sector"]
-
-  depends_on = [
-    google_project_service.apis,
-    google_secret_manager_secret.finnhub_key,
-    module.pubsub,
-  ]
 }

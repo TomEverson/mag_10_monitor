@@ -1,6 +1,6 @@
 # mag10-monitor
 
-Real-time market intelligence pipeline for MAG 7 + AMD, AVGO, PLTR. Ingests live trades via Finnhub WebSocket, detects four signal types, and surfaces them on a Streamlit dashboard backed by BigQuery — all on a single GCP e2-micro VM, four Cloud Functions, and one Cloud Run service.
+Real-time market intelligence pipeline for MAG 7 + AMD, AVGO, PLTR. Ingests live trades via Finnhub WebSocket, detects four signal types, archives them through a Bronze/Silver/Gold data lakehouse on GCS and BigQuery, and surfaces results on a Streamlit dashboard — all on GCP.
 
 ## Architecture
 
@@ -8,29 +8,56 @@ Real-time market intelligence pipeline for MAG 7 + AMD, AVGO, PLTR. Ingests live
 Finnhub WebSocket
       │
       ▼
-listener/ (e2-micro VM)
-  • Volume spike detector
-  • Momentum signal detector
-  • Volatility spike detector
-  • Sector snapshot (every 60s)
+websocket/ (e2-micro VM)
+  Publishes raw trades: { s, p, v, t }
       │
-      ├──► Pub/Sub: mag10-volume-spike
-      ├──► Pub/Sub: mag10-momentum-signal
-      ├──► Pub/Sub: mag10-volatility-spike
-      └──► Pub/Sub: mag10-sector-snapshot
-                │
-                ▼
-         Cloud Functions (one per topic)
-           • Validates payload
-           • Archives raw event to GCS
-           • Streams row to BigQuery
-                │
-                ▼
-           BigQuery (dataset: signals)
-                │
-                ▼
-           Streamlit Dashboard (Cloud Run)
+      ▼
+Pub/Sub: mag10-raw-trades
+      │
+      ├──► Bronze (Cloud Storage subscription)
+      │      gs://mag-10-raw/bronze/YYYY-MM-DD...json
+      │      Raw trade batches — used for warm-start on Detection VM restart
+      │
+      └──► Detection subscription (pull)
+             │
+             ▼
+      detection/ (e2-micro VM)
+        • Volume spike detector    (rolling window, in-RAM)
+        • Momentum signal detector (rolling window, in-RAM)
+        • Volatility spike detector(rolling window, in-RAM)
+        • Sector snapshot          (every 60 s)
+        Warm-starts from Bronze on restart
+             │
+             ▼
+      Pub/Sub: mag10-processed-signals
+             │
+             ▼
+      Archive subscription (push → CF)
+             │
+             ▼
+      CF: mag10-archive                      Silver layer
+        Validates payload (Pydantic)  ──►  gs://mag-10-raw/silver/{type}/YYYY/MM/DD/...json
+        Routes by signal_type attribute
+             │ (GCS object finalization trigger)
+             ▼
+      CF: mag10-gcs-to-bq                    Gold layer
+        Routes by GCS path prefix    ──►  BigQuery dataset: signals
+        Deterministic insertId               • volume_spikes
+        (deduplication)                      • momentum_signals
+                                             • volatility_spikes
+                                             • sector_snapshots
+                                                   │
+                                                   ▼
+                                        Streamlit Dashboard (Cloud Run)
 ```
+
+## Data layers
+
+| Layer | Location | Written by | Contents |
+|-------|----------|-----------|----------|
+| Bronze | `gs://mag-10-raw/bronze/` | Pub/Sub Cloud Storage subscription | Raw trade JSON batches, 60 s windows |
+| Silver | `gs://mag-10-raw/silver/{type}/YYYY/MM/DD/` | CF `mag10-archive` | Validated processed signal JSON, one file per event |
+| Gold | BigQuery `signals.*` | CF `mag10-gcs-to-bq` | Queryable signal tables with `processed_at` timestamps |
 
 ## Prerequisites
 
@@ -38,191 +65,161 @@ listener/ (e2-micro VM)
 - [`gcloud` CLI](https://cloud.google.com/sdk/docs/install) authenticated (`gcloud auth login`)
 - [Terraform](https://developer.hashicorp.com/terraform/install) >= 1.6
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) (Python package manager)
-- [Docker](https://docs.docker.com/get-docker/) (for building the listener image)
 - A [Finnhub](https://finnhub.io) API key (free tier is sufficient)
 
 ## Deployment
 
-Deployment is a five-step process. Steps 1–3 provision GCP infrastructure, step 4 deploys the listener, and step 5 deploys the Cloud Functions and wires them to Pub/Sub.
+Deployment is a two-phase process. Phase 1 provisions infrastructure and VMs; Phase 2 deploys Cloud Functions and switches Pub/Sub to push mode.
 
-### Step 1 — Create a Terraform state bucket
-
-This bucket is managed outside Terraform and must exist before `terraform init`.
+### Step 1 — Store secrets
 
 ```bash
-gsutil mb -p YOUR_PROJECT_ID gs://YOUR_TF_STATE_BUCKET
+# Finnhub API key (required by WebSocket VM)
+echo -n "YOUR_FINNHUB_KEY" | \
+  gcloud secrets versions add mag10-finnhub-key \
+    --project=YOUR_PROJECT_ID --data-file=-
+
+# Dashboard password
+echo -n "yourpassword" | \
+  gcloud secrets versions add mag10-dashboard-password \
+    --project=YOUR_PROJECT_ID --data-file=-
 ```
 
-Uncomment the `backend "gcs"` block in `infra/main.tf` and set the bucket name.
+### Step 2 — Build and push Docker images
 
-### Step 2 — Provision GCP infrastructure
+Uses Cloud Build — no local Docker required.
+
+```bash
+PROJECT=YOUR_PROJECT_ID
+REGION=asia-southeast1
+REPO="${REGION}-docker.pkg.dev/${PROJECT}/mag10-images"
+
+gcloud builds submit --project=$PROJECT --region=$REGION \
+  --tag="${REPO}/websocket:latest" websocket/
+
+gcloud builds submit --project=$PROJECT --region=$REGION \
+  --tag="${REPO}/detection:latest" detection/
+
+gcloud builds submit --project=$PROJECT --region=$REGION \
+  --tag="${REPO}/dashboard:latest" dashboard/
+```
+
+### Step 3 — First Terraform apply (infrastructure + VMs)
 
 ```bash
 cd infra
 
 cat > terraform.tfvars <<EOF
-gcp_project_id = "YOUR_PROJECT_ID"
-listener_image = "us-central1-docker.pkg.dev/YOUR_PROJECT_ID/mag10-images/listener:latest"
+gcp_project_id  = "YOUR_PROJECT_ID"
+websocket_image = "asia-southeast1-docker.pkg.dev/YOUR_PROJECT_ID/mag10-images/websocket:latest"
+detection_image = "asia-southeast1-docker.pkg.dev/YOUR_PROJECT_ID/mag10-images/detection:latest"
+dashboard_image = "asia-southeast1-docker.pkg.dev/YOUR_PROJECT_ID/mag10-images/dashboard:latest"
 EOF
 
 terraform init
 terraform apply
 ```
 
-This creates Pub/Sub topics (in pull mode), BigQuery tables, GCS bucket, Artifact Registry, VM, and service accounts.
+This creates: Pub/Sub topics and subscriptions (archive in pull mode), GCS bucket, BigQuery tables, Artifact Registry, both VMs, service accounts, and Cloud Run dashboard.
 
-### Step 3 — Store the Finnhub API key
-
-```bash
-echo -n "YOUR_FINNHUB_KEY" | \
-  gcloud secrets versions add mag10-finnhub-key \
-    --project=YOUR_PROJECT_ID \
-    --data-file=-
-```
-
-### Step 4 — Build and push the listener image
-
-```bash
-cd listener
-
-REGION=us-central1
-PROJECT_ID=YOUR_PROJECT_ID
-IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/mag10-images/listener:latest"
-
-gcloud auth configure-docker "${REGION}-docker.pkg.dev"
-docker build -t "${IMAGE}" .
-docker push "${IMAGE}"
-```
-
-The VM will pull and run this image on startup. To restart the VM after a new image push:
-
-```bash
-gcloud compute instances reset mag10-listener-vm-prod \
-  --project=YOUR_PROJECT_ID --zone=us-central1-a
-```
-
-### Step 5 — Deploy Cloud Functions and enable push delivery
+### Step 4 — Deploy Cloud Functions
 
 ```bash
 export GCP_PROJECT_ID=YOUR_PROJECT_ID
 ./scripts/deploy_functions.sh
 ```
 
-The script copies `functions/shared/` into each function directory, deploys all four functions, and prints the four function URLs. Add them to `infra/terraform.tfvars`:
+The script deploys both functions and prints the archive function URL:
 
-```hcl
-volume_function_url     = "https://..."
-momentum_function_url   = "https://..."
-volatility_function_url = "https://..."
-sector_function_url     = "https://..."
+```
+archive_function_url = "https://mag10-archive-<hash>-as.a.run.app"
 ```
 
-Then re-apply Terraform to switch Pub/Sub subscriptions from pull to push:
+### Step 5 — Second Terraform apply (enable push delivery)
+
+Add the archive URL to `infra/terraform.tfvars`:
+
+```hcl
+archive_function_url = "https://mag10-archive-<hash>-as.a.run.app"
+```
+
+Then re-apply to switch the Pub/Sub subscription from pull to push:
 
 ```bash
 cd infra && terraform apply
 ```
 
-## Dashboard
-
-The dashboard is a Streamlit app deployed on Cloud Run. Build and push the image, then set `dashboard_image` in `infra/terraform.tfvars` and re-apply Terraform.
-
-```bash
-cd dashboard
-
-REGION=us-central1
-PROJECT_ID=YOUR_PROJECT_ID
-IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/mag10-images/dashboard:latest"
-
-gcloud auth configure-docker "${REGION}-docker.pkg.dev"
-docker build -t "${IMAGE}" .
-docker push "${IMAGE}"
-```
-
-Set the dashboard password:
-
-```bash
-echo -n "yourpassword" | \
-  gcloud secrets versions add mag10-dashboard-password \
-    --project=YOUR_PROJECT_ID \
-    --data-file=-
-```
-
-Then add to `infra/terraform.tfvars`:
-
-```hcl
-dashboard_image = "us-central1-docker.pkg.dev/YOUR_PROJECT_ID/mag10-images/dashboard:latest"
-```
-
-And re-apply:
-
-```bash
-cd infra && terraform apply
-```
-
-The dashboard URL is printed as a Terraform output. It has six tabs: Live Signals, Volume Analysis, Momentum & Correlation, Volatility & Sector, Analytics, and News & Sentiment.
-
-## Local development
-
-### Listener
-
-```bash
-cd listener
-cp .env.example .env      # fill in your values
-uv sync
-uv run python main.py
-```
-
-### Cloud Functions
-
-Each function can be tested locally with the Functions Framework:
-
-```bash
-cd functions/volume
-cp -r ../shared ./shared  # required at runtime
-uv sync
-uv run functions-framework --target=handle --debug
-```
-
-Send a test request:
-
-```bash
-curl -X POST http://localhost:8080 \
-  -H "Content-Type: application/json" \
-  -d '{"message": {"data": "<base64-encoded-payload>"}}'
-```
+The pipeline is now fully live.
 
 ## Repository layout
 
 ```
 mag10-monitor/
-├── spec/            # Source of truth — read before modifying code
-├── listener/        # WebSocket listener (runs on e2-micro VM)
-│   └── detectors/   # Volume, momentum, volatility, sector detectors
-├── functions/       # Cloud Functions — one per Pub/Sub topic
-│   └── shared/      # Pydantic models + BigQuery client (copied at deploy time)
-├── infra/           # Terraform — all GCP resources
-│   └── modules/     # vm, pubsub, bigquery, gcs
-├── dashboard/       # Streamlit app (Cloud Run)
-│   ├── streamlit_app.py  # UI — 6 tabs
-│   └── queries.py        # BigQuery query functions
+├── spec/              # Source of truth — read before modifying code
+├── websocket/         # Finnhub WebSocket ingest service (e2-micro VM)
+├── detection/         # Signal detection service (e2-micro VM)
+│   └── detectors/     # Volume, momentum, volatility, sector detectors
+├── functions/
+│   ├── archive/       # CF: Pub/Sub push → GCS Silver
+│   ├── gcs_to_bq/     # CF: GCS finalization → BigQuery
+│   └── shared/        # Pydantic models + BigQuery client (copied at deploy time)
+├── dashboard/         # Streamlit app (Cloud Run)
+│   ├── streamlit_app.py
+│   └── queries.py
+├── infra/             # Terraform — all GCP resources
+│   └── modules/       # vm, pubsub, bigquery, gcs
 └── scripts/
     └── deploy_functions.sh
 ```
 
-## Updating dependencies
+## Rebuilding a service
 
-Each service manages its own isolated environment.
+After code changes, rebuild the image and reset the VM:
 
 ```bash
-# Add a dependency to a function
-cd functions/volume
-uv add some-package
-uv pip compile pyproject.toml -o requirements.txt   # regenerate for GCP
+# Rebuild (e.g. websocket)
+gcloud builds submit --project=$PROJECT --region=$REGION \
+  --tag="${REPO}/websocket:latest" websocket/
 
-# Add a dependency to the listener
-cd listener
-uv add some-package
+# Reset VM to pull new image
+gcloud compute instances reset mag10-websocket-prod \
+  --project=$PROJECT --zone=asia-southeast1-b
 ```
 
-Never edit `requirements.txt` by hand. Never use `pip` directly.
+For Cloud Functions, re-run `./scripts/deploy_functions.sh`.
+
+## Local development
+
+```bash
+# WebSocket service
+cd websocket
+cp .env.example .env   # fill in values
+uv sync
+uv run python main.py
+
+# Detection service
+cd detection
+cp .env.example .env
+uv sync
+uv run python main.py
+
+# Archive function (local testing)
+cd functions/archive
+cp -r ../shared ./shared
+uv sync
+uv run functions-framework --target=handle --debug
+```
+
+## Dependency management
+
+Each service manages its own isolated environment with `uv`. Never use `pip` directly and never edit `requirements.txt` by hand.
+
+```bash
+# Add a dependency
+cd websocket
+uv add some-package
+
+# Regenerate requirements.txt for Cloud Functions deploy
+cd functions/archive
+uv pip compile pyproject.toml -o requirements.txt
+```

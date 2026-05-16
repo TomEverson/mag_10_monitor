@@ -1,21 +1,36 @@
-output "listener_vm_name" {
-  description = "Compute Engine instance name"
+output "websocket_vm_name" {
+  description = "WebSocket ingest VM name"
   value       = module.vm.instance_name
 }
 
-output "listener_external_ip" {
-  description = "Listener VM external IP (ephemeral)"
+output "websocket_external_ip" {
+  description = "WebSocket VM external IP (ephemeral)"
   value       = module.vm.external_ip
 }
 
-output "pubsub_topic_names" {
-  description = "Map of signal type → Pub/Sub topic name"
-  value       = module.pubsub.topic_names
+output "detection_vm_name" {
+  description = "Signal detection VM name"
+  value       = google_compute_instance.detection.name
 }
 
-output "pubsub_subscription_ids" {
-  description = "Map of signal type → subscription resource ID"
-  value       = module.pubsub.subscription_ids
+output "detection_external_ip" {
+  description = "Detection VM external IP (ephemeral)"
+  value       = google_compute_instance.detection.network_interface[0].access_config[0].nat_ip
+}
+
+output "raw_trades_topic_name" {
+  description = "Pub/Sub topic name for raw trades"
+  value       = module.pubsub.raw_trades_topic_name
+}
+
+output "processed_signals_topic_name" {
+  description = "Pub/Sub topic name for processed signals"
+  value       = module.pubsub.processed_signals_topic_name
+}
+
+output "detection_subscription_name" {
+  description = "Pub/Sub pull subscription name for the detection VM"
+  value       = module.pubsub.detection_subscription_name
 }
 
 output "bq_dataset_id" {
@@ -29,7 +44,7 @@ output "bq_table_ids" {
 }
 
 output "gcs_raw_bucket" {
-  description = "GCS raw event archive bucket name"
+  description = "GCS bucket name (Bronze + Silver layers)"
   value       = module.gcs.bucket_name
 }
 

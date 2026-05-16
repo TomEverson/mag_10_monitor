@@ -1,14 +1,11 @@
-output "topic_ids" {
-  description = "Map of topic key → full topic resource ID"
-  value       = { for k, t in google_pubsub_topic.topics : k => t.id }
+output "raw_trades_topic_name" {
+  value = google_pubsub_topic.raw_trades.name
 }
 
-output "topic_names" {
-  description = "Map of topic key → topic name (short)"
-  value       = { for k, t in google_pubsub_topic.topics : k => t.name }
+output "processed_signals_topic_name" {
+  value = google_pubsub_topic.processed_signals.name
 }
 
-output "subscription_ids" {
-  description = "Map of topic key → subscription resource ID"
-  value       = { for k, s in google_pubsub_subscription.subscriptions : k => s.id }
+output "detection_subscription_name" {
+  value = google_pubsub_subscription.detection.name
 }

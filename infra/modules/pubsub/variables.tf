@@ -3,28 +3,18 @@ variable "functions_sa_email" {
   type        = string
 }
 
-# Function URLs — optional. When empty the subscription is pull (pre-deploy).
-# Set these after Cloud Functions are deployed and run terraform apply again.
-variable "volume_function_url" {
-  description = "Cloud Function URL for the volume spike handler"
+variable "gcs_bucket" {
+  description = "GCS bucket name for the Bronze Cloud Storage subscription"
   type        = string
-  default     = ""
 }
 
-variable "momentum_function_url" {
-  description = "Cloud Function URL for the momentum signal handler"
-  type        = string
-  default     = ""
+variable "gcs_bucket_resource" {
+  description = "GCS bucket resource — used to ensure the bucket exists before creating the subscription"
+  type        = any
 }
 
-variable "volatility_function_url" {
-  description = "Cloud Function URL for the volatility spike handler"
-  type        = string
-  default     = ""
-}
-
-variable "sector_function_url" {
-  description = "Cloud Function URL for the sector snapshot handler"
+variable "archive_function_url" {
+  description = "CF archive URL — leave empty on first apply (pull mode), set after deploying the function"
   type        = string
   default     = ""
 }

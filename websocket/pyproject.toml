@@ -1,0 +1,13 @@
+[project]
+name = "mag10-websocket"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "websockets>=13.0",
+    "google-cloud-pubsub>=2.21.0",
+    "python-dotenv>=1.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
